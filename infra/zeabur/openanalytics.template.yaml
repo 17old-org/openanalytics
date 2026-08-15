@@ -1,0 +1,412 @@
+apiVersion: zeabur.com/v1
+kind: Template
+metadata:
+  name: OpenAnalytics for 17old
+spec:
+  description: Privacy-first OpenAnalytics v0.4.2 for the 17old Zeabur server.
+  icon: https://raw.githubusercontent.com/OpenLabs-so/openanalytics/main/docs/images/logo.png
+  services:
+    - name: OpenAnalytics PostgreSQL
+      template: PREBUILT
+      spec:
+        source:
+          image: postgres:17-alpine
+        ports:
+          - id: postgres
+            port: 5432
+            type: TCP
+        volumes:
+          - id: data
+            dir: /var/lib/postgresql/data
+        env:
+          POSTGRES_USER:
+            default: openanalytics
+          POSTGRES_DB:
+            default: openanalytics
+          POSTGRES_PASSWORD:
+            default: __OA_POSTGRES_PASSWORD__
+          OA_POSTGRES_HOST:
+            default: ${CONTAINER_HOSTNAME}
+            expose: true
+
+    - name: OpenAnalytics ClickHouse
+      template: PREBUILT
+      spec:
+        source:
+          image: ghcr.io/openlabs-so/openanalytics/clickhouse:v0.4.2
+        ports:
+          - id: http
+            port: 8123
+            type: TCP
+        volumes:
+          - id: data
+            dir: /var/lib/clickhouse
+        env:
+          CLICKHOUSE_INGEST_PASSWORD:
+            default: __OA_CLICKHOUSE_INGEST_PASSWORD__
+          CLICKHOUSE_READ_PASSWORD:
+            default: __OA_CLICKHOUSE_READ_PASSWORD__
+          CLICKHOUSE_MAINTENANCE_PASSWORD:
+            default: __OA_CLICKHOUSE_MAINTENANCE_PASSWORD__
+          CLICKHOUSE_MIGRATION_PASSWORD:
+            default: __OA_CLICKHOUSE_MIGRATION_PASSWORD__
+          OA_CLICKHOUSE_HOST:
+            default: ${CONTAINER_HOSTNAME}
+            expose: true
+
+    - name: OpenAnalytics Valkey Queue
+      template: PREBUILT
+      spec:
+        source:
+          image: ghcr.io/openlabs-so/openanalytics/valkey:v0.4.2
+        ports:
+          - id: redis
+            port: 6379
+            type: TCP
+        volumes:
+          - id: data
+            dir: /data
+        env:
+          VALKEY_PASSWORD:
+            default: __OA_VALKEY_QUEUE_PASSWORD__
+          OA_VALKEY_QUEUE_HOST:
+            default: ${CONTAINER_HOSTNAME}
+            expose: true
+          OA_VALKEY_QUEUE_PASSWORD:
+            default: __OA_VALKEY_QUEUE_PASSWORD__
+            expose: true
+          OA_VALKEY_CONF:
+            default: /usr/local/etc/valkey/valkey-queue.conf
+
+    - name: OpenAnalytics Valkey Realtime
+      template: PREBUILT
+      spec:
+        source:
+          image: ghcr.io/openlabs-so/openanalytics/valkey:v0.4.2
+        ports:
+          - id: redis
+            port: 6379
+            type: TCP
+        volumes:
+          - id: data
+            dir: /data
+        env:
+          VALKEY_PASSWORD:
+            default: __OA_VALKEY_REALTIME_PASSWORD__
+          OA_VALKEY_REALTIME_HOST:
+            default: ${CONTAINER_HOSTNAME}
+            expose: true
+          OA_VALKEY_REALTIME_PASSWORD:
+            default: __OA_VALKEY_REALTIME_PASSWORD__
+            expose: true
+          OA_VALKEY_CONF:
+            default: /usr/local/etc/valkey/valkey-realtime.conf
+
+    - name: OpenAnalytics Migrate
+      template: PREBUILT
+      dependencies:
+        - OpenAnalytics PostgreSQL
+        - OpenAnalytics ClickHouse
+      spec:
+        source:
+          image: ghcr.io/openlabs-so/openanalytics/migrate:v0.4.2
+          command:
+            - sh
+            - -ec
+            - |
+              for attempt in $(seq 1 60); do
+                node -e "require('net').connect(5432, process.env.OA_POSTGRES_HOST).once('connect', () => process.exit(0)).once('error', () => process.exit(1))" && break
+                [ "$attempt" = 60 ] && exit 1
+                sleep 2
+              done
+              for attempt in $(seq 1 60); do
+                node -e "fetch('http://' + process.env.OA_CLICKHOUSE_HOST + ':8123/ping').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" && break
+                [ "$attempt" = 60 ] && exit 1
+                sleep 2
+              done
+              node packages/postgres/dist/cli.js
+              node packages/clickhouse/dist/cli.js
+              exec sleep infinity
+        env:
+          ENVIRONMENT:
+            default: production
+          POSTGRES_MIGRATION_URL:
+            default: postgresql://openanalytics:__OA_POSTGRES_PASSWORD__@${OA_POSTGRES_HOST}:5432/openanalytics
+          CLICKHOUSE_URL:
+            default: http://${OA_CLICKHOUSE_HOST}:8123
+          CLICKHOUSE_DATABASE:
+            default: analytics
+          CLICKHOUSE_MIGRATION_USER:
+            default: oa_migration
+          CLICKHOUSE_MIGRATION_PASSWORD:
+            default: __OA_CLICKHOUSE_MIGRATION_PASSWORD__
+
+    - name: OpenAnalytics Query Gateway
+      template: PREBUILT
+      dependencies:
+        - OpenAnalytics Migrate
+        - OpenAnalytics Valkey Realtime
+      spec:
+        source:
+          image: ghcr.io/openlabs-so/openanalytics/query-gateway:v0.4.2
+          command:
+            - sh
+            - -ec
+            - 'printf %s "$OA_QUERY_PUBLIC_KEY_B64" | base64 -d > /tmp/oa-query-public.pem; exec node "$APP_MAIN"'
+        ports:
+          - id: http
+            port: 8081
+            type: HTTP
+        healthCheck:
+          type: HTTP
+          port: http
+          http:
+            path: /health
+        env:
+          NODE_ENV:
+            default: production
+          ENVIRONMENT:
+            default: production
+          PORT:
+            default: '8081'
+          CLICKHOUSE_URL:
+            default: http://${OA_CLICKHOUSE_HOST}:8123
+          CLICKHOUSE_DB:
+            default: analytics
+          CLICKHOUSE_READ_USER:
+            default: oa_read
+          CLICKHOUSE_READ_PASSWORD:
+            default: __OA_CLICKHOUSE_READ_PASSWORD__
+          REALTIME_CACHE_REDIS_URL:
+            default: redis://:__OA_VALKEY_REALTIME_PASSWORD__@${OA_VALKEY_REALTIME_HOST}:6379
+          QUERY_SIGNING_KEY_ID:
+            default: oa-selfhost-1
+          QUERY_SIGNING_PUBLIC_KEY_FILE:
+            default: /tmp/oa-query-public.pem
+          OA_QUERY_PUBLIC_KEY_B64:
+            default: __OA_QUERY_PUBLIC_KEY_B64__
+          OA_QUERY_GATEWAY_HOST:
+            default: ${CONTAINER_HOSTNAME}
+            expose: true
+
+    - name: OpenAnalytics API
+      template: PREBUILT
+      dependencies:
+        - OpenAnalytics Migrate
+        - OpenAnalytics Query Gateway
+        - OpenAnalytics Valkey Realtime
+      spec:
+        source:
+          image: ghcr.io/openlabs-so/openanalytics/api:v0.4.2
+          command:
+            - sh
+            - -ec
+            - |
+              printf %s "$OA_QUERY_PRIVATE_KEY_B64" | base64 -d > /tmp/oa-query-private.pem
+              printf %s "$OA_REALTIME_PRIVATE_KEY_B64" | base64 -d > /tmp/oa-realtime-private.pem
+              exec node "$APP_MAIN"
+        ports:
+          - id: http
+            port: 8082
+            type: HTTP
+        healthCheck:
+          type: HTTP
+          port: http
+          http:
+            path: /health
+        env:
+          NODE_ENV:
+            default: production
+          ENVIRONMENT:
+            default: production
+          PORT:
+            default: '8082'
+          DATABASE_URL:
+            default: postgresql://openanalytics:__OA_POSTGRES_PASSWORD__@${OA_POSTGRES_HOST}:5432/openanalytics
+          REALTIME_CACHE_REDIS_URL:
+            default: redis://:__OA_VALKEY_REALTIME_PASSWORD__@${OA_VALKEY_REALTIME_HOST}:6379
+          QUERY_GATEWAY_URL:
+            default: http://${OA_QUERY_GATEWAY_HOST}:8081
+          AUTH_BASE_URL:
+            default: https://__OA_API_DOMAIN__
+          APP_BASE_URL:
+            default: https://__OA_APP_DOMAIN__
+          COLLECTOR_BASE_URL:
+            default: https://__OA_COLLECTOR_DOMAIN__
+          AUTH_TRUSTED_ORIGINS:
+            default: https://__OA_APP_DOMAIN__
+          PRODUCT_NAME:
+            default: 17old Analytics
+          AUTH_SECRET:
+            default: __OA_AUTH_SECRET__
+          TRIAL_IDENTITY_SECRET:
+            default: __OA_TRIAL_IDENTITY_SECRET__
+          CREDENTIAL_SOURCE_SECRET:
+            default: __OA_CREDENTIAL_SOURCE_SECRET__
+          DEPLOYMENT_SETTINGS:
+            default: disabled
+          AUTH_PASSWORD_SIGNIN:
+            default: enabled
+          QUERY_SIGNING_KEY_ID:
+            default: oa-selfhost-1
+          QUERY_SIGNING_PRIVATE_KEY_FILE:
+            default: /tmp/oa-query-private.pem
+          REALTIME_TOKEN_SIGNING_KEY_FILE:
+            default: /tmp/oa-realtime-private.pem
+          OA_QUERY_PRIVATE_KEY_B64:
+            default: __OA_QUERY_PRIVATE_KEY_B64__
+          OA_REALTIME_PRIVATE_KEY_B64:
+            default: __OA_REALTIME_PRIVATE_KEY_B64__
+
+    - name: OpenAnalytics Collector
+      template: PREBUILT
+      dependencies:
+        - OpenAnalytics Migrate
+        - OpenAnalytics Valkey Queue
+        - OpenAnalytics Valkey Realtime
+      spec:
+        source:
+          image: ghcr.io/openlabs-so/openanalytics/collector:v0.4.2
+        ports:
+          - id: http
+            port: 8083
+            type: HTTP
+        healthCheck:
+          type: HTTP
+          port: http
+          http:
+            path: /health
+        env:
+          NODE_ENV:
+            default: production
+          ENVIRONMENT:
+            default: production
+          PORT:
+            default: '8083'
+          DATABASE_URL:
+            default: postgresql://openanalytics:__OA_POSTGRES_PASSWORD__@${OA_POSTGRES_HOST}:5432/openanalytics
+          EVENT_STREAM_REDIS_URL:
+            default: redis://:__OA_VALKEY_QUEUE_PASSWORD__@${OA_VALKEY_QUEUE_HOST}:6379
+          REALTIME_CACHE_REDIS_URL:
+            default: redis://:__OA_VALKEY_REALTIME_PASSWORD__@${OA_VALKEY_REALTIME_HOST}:6379
+          ANONYMOUS_IDENTITY_SECRET:
+            default: __OA_ANONYMOUS_IDENTITY_SECRET__
+          ANONYMOUS_IDENTITY_KEY_VERSION:
+            default: '1'
+
+    - name: OpenAnalytics Realtime
+      template: PREBUILT
+      dependencies:
+        - OpenAnalytics Migrate
+        - OpenAnalytics Valkey Realtime
+      spec:
+        source:
+          image: ghcr.io/openlabs-so/openanalytics/realtime:v0.4.2
+          command:
+            - sh
+            - -ec
+            - 'printf %s "$OA_REALTIME_PUBLIC_KEY_B64" | base64 -d > /tmp/oa-realtime-public.pem; exec node "$APP_MAIN"'
+        ports:
+          - id: http
+            port: 8084
+            type: HTTP
+        healthCheck:
+          type: HTTP
+          port: http
+          http:
+            path: /health
+        env:
+          NODE_ENV:
+            default: production
+          ENVIRONMENT:
+            default: production
+          PORT:
+            default: '8084'
+          REALTIME_CACHE_REDIS_URL:
+            default: redis://:__OA_VALKEY_REALTIME_PASSWORD__@${OA_VALKEY_REALTIME_HOST}:6379
+          REALTIME_TOKEN_VERIFY_KEY_FILE:
+            default: /tmp/oa-realtime-public.pem
+          OA_REALTIME_PUBLIC_KEY_B64:
+            default: __OA_REALTIME_PUBLIC_KEY_B64__
+
+    - name: OpenAnalytics Worker
+      template: PREBUILT
+      dependencies:
+        - OpenAnalytics Migrate
+        - OpenAnalytics Valkey Queue
+        - OpenAnalytics Valkey Realtime
+      spec:
+        source:
+          image: ghcr.io/openlabs-so/openanalytics/worker:v0.4.2
+        ports:
+          - id: http
+            port: 8085
+            type: HTTP
+        healthCheck:
+          type: HTTP
+          port: http
+          http:
+            path: /health
+        env:
+          NODE_ENV:
+            default: production
+          ENVIRONMENT:
+            default: production
+          PORT:
+            default: '8085'
+          DATABASE_URL:
+            default: postgresql://openanalytics:__OA_POSTGRES_PASSWORD__@${OA_POSTGRES_HOST}:5432/openanalytics
+          EVENT_STREAM_REDIS_URL:
+            default: redis://:__OA_VALKEY_QUEUE_PASSWORD__@${OA_VALKEY_QUEUE_HOST}:6379
+          REALTIME_CACHE_REDIS_URL:
+            default: redis://:__OA_VALKEY_REALTIME_PASSWORD__@${OA_VALKEY_REALTIME_HOST}:6379
+          CLICKHOUSE_URL:
+            default: http://${OA_CLICKHOUSE_HOST}:8123
+          CLICKHOUSE_DB:
+            default: analytics
+          CLICKHOUSE_INGEST_USER:
+            default: oa_ingest
+          CLICKHOUSE_INGEST_PASSWORD:
+            default: __OA_CLICKHOUSE_INGEST_PASSWORD__
+          CLICKHOUSE_MAINTENANCE_USER:
+            default: oa_maintenance
+          CLICKHOUSE_MAINTENANCE_PASSWORD:
+            default: __OA_CLICKHOUSE_MAINTENANCE_PASSWORD__
+          ANONYMOUS_IDENTITY_SECRET:
+            default: __OA_ANONYMOUS_IDENTITY_SECRET__
+          ANONYMOUS_IDENTITY_KEY_VERSION:
+            default: '1'
+          DEPLOYMENT_SETTINGS:
+            default: disabled
+          PRODUCT_NAME:
+            default: 17old Analytics
+          EMAIL_FROM:
+            default: 17old Analytics <analytics@17-old.org>
+
+    - name: OpenAnalytics Web
+      template: PREBUILT
+      dependencies:
+        - OpenAnalytics API
+      spec:
+        source:
+          image: ghcr.io/openlabs-so/openanalytics/web:v0.4.2
+        ports:
+          - id: http
+            port: 3000
+            type: HTTP
+        healthCheck:
+          type: HTTP
+          port: http
+          http:
+            path: /login
+        env:
+          NODE_ENV:
+            default: production
+          PORT:
+            default: '3000'
+          NEXT_PUBLIC_API_URL:
+            default: https://__OA_API_DOMAIN__
+          NEXT_PUBLIC_REALTIME_URL:
+            default: https://__OA_REALTIME_DOMAIN__
+          NEXT_PUBLIC_COLLECTOR_URL:
+            default: https://__OA_COLLECTOR_DOMAIN__
