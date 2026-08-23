@@ -99,6 +99,7 @@ export { createS3ObjectStorage } from './object-storage-s3.ts'
 export {
   createLogEmailTransport,
   createResendTransport,
+  createSendflareTransport,
   createSmtpTransport,
   selectEmailTransport,
   SMTP_DEFAULT_PORT,
@@ -109,6 +110,7 @@ export {
   type EmailTransport,
   type LogEmailTransport,
   type ResendTransportConfig,
+  type SendflareTransportConfig,
   type SelectEmailTransportDeps,
   type SmtpEnvBlock,
   type SmtpMailer,

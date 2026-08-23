@@ -3,6 +3,7 @@ import {
   buildMagicLinkEmailPayload,
   buildVerificationEmailPayload,
   createResendTransport,
+  createSendflareTransport,
   createSmtpTransport,
   parseEmailOutboxPayload,
   processEmailOutbox,
@@ -49,6 +50,14 @@ describe('email transport selection', () => {
     expect(transport.id).toBe('resend')
   })
 
+  it('uses Sendflare when its key is present', () => {
+    const transport = selectEmailTransport({
+      sendflareApiKey: 'live_test',
+      defaultFrom: 'noreply@test',
+    })
+    expect(transport.id).toBe('sendflare')
+  })
+
   it('uses SMTP when a host is present and no Resend key is', () => {
     const transport = selectEmailTransport({
       smtp: { host: 'mail.test' },
@@ -77,6 +86,24 @@ describe('email transport selection', () => {
     expect(transport.id).toBe('resend')
     expect(events).toEqual([
       { event: 'email_transport_conflict', fields: { chose: 'resend', ignored: 'smtp' } },
+    ])
+  })
+
+  it('prefers Sendflare over the other environment transports and says so', () => {
+    const events: { event: string; fields: Record<string, unknown> }[] = []
+    const transport = selectEmailTransport({
+      sendflareApiKey: 'live_test',
+      apiKey: 're_test',
+      smtp: { host: 'mail.test' },
+      defaultFrom: 'noreply@test',
+      log: (event, fields) => events.push({ event, fields }),
+    })
+    expect(transport.id).toBe('sendflare')
+    expect(events).toEqual([
+      {
+        event: 'email_transport_conflict',
+        fields: { chose: 'sendflare', ignored: ['resend', 'smtp'] },
+      },
     ])
   })
 
@@ -259,6 +286,103 @@ describe('Resend transport', () => {
       message,
     )
     expect(outcome).toEqual({ ok: false, reason: 'unavailable', detail: 'resend request failed' })
+  })
+})
+
+describe('Sendflare transport', () => {
+  const config = { apiKey: 'live_test', defaultFrom: 'Open Analytics <hello@example.com>' }
+  const message: EmailMessage = { to: 'a@b.com', subject: 's', html: '<p>h</p>' }
+
+  it('sends the documented payload and returns the provider email id', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            requestId: 'request-1',
+            code: 0,
+            success: true,
+            data: { emailId: 'email-1' },
+          }),
+          { status: 200 },
+        ),
+    )
+    const outcome = await createSendflareTransport(
+      config,
+      fetchImpl as unknown as typeof fetch,
+    ).send(message)
+
+    expect(outcome).toEqual({ ok: true, id: 'email-1' })
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://api.sendflare.com/v1/send',
+      expect.objectContaining({
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer live_test',
+          'content-type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({
+          from: 'Open Analytics <hello@example.com>',
+          to: 'a@b.com',
+          subject: 's',
+          body: '<p>h</p>',
+        }),
+      }),
+    )
+  })
+
+  it('requires the provider business success fields, even on HTTP 200', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ code: 100030, success: false, message: 'domain' }), {
+          status: 200,
+        }),
+    )
+    const outcome = await createSendflareTransport(
+      config,
+      fetchImpl as unknown as typeof fetch,
+    ).send(message)
+    expect(outcome).toEqual({ ok: false, reason: 'invalid', detail: 'sendflare responded 100030' })
+  })
+
+  it('maps auth, rate-limit, server and malformed responses to typed reasons', async () => {
+    const cases: Array<[Response, string]> = [
+      [new Response('', { status: 401 }), 'unauthorized'],
+      [new Response('', { status: 429 }), 'unavailable'],
+      [new Response('', { status: 503 }), 'unavailable'],
+      [
+        new Response(JSON.stringify({ code: 100029, success: false }), { status: 200 }),
+        'unauthorized',
+      ],
+      [
+        new Response(JSON.stringify({ code: 100025, success: false }), { status: 200 }),
+        'unavailable',
+      ],
+      [new Response('not-json', { status: 200 }), 'invalid'],
+    ]
+    for (const [response, reason] of cases) {
+      const fetchImpl = vi.fn(async () => response)
+      const outcome = await createSendflareTransport(
+        config,
+        fetchImpl as unknown as typeof fetch,
+      ).send(message)
+      expect(outcome.ok).toBe(false)
+      if (!outcome.ok) expect(outcome.reason).toBe(reason)
+    }
+  })
+
+  it('treats a transport error as retryable-unavailable without leaking it', async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('secret-bearing network error')
+    })
+    const outcome = await createSendflareTransport(
+      config,
+      fetchImpl as unknown as typeof fetch,
+    ).send(message)
+    expect(outcome).toEqual({
+      ok: false,
+      reason: 'unavailable',
+      detail: 'sendflare request failed',
+    })
   })
 })
 

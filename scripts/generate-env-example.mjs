@@ -162,6 +162,8 @@ const HINTS = {
     'Leave required. The first account is written verified — there is no mail to verify it with, which is why it exists — so the usual install never needs this. `optional` is the escape hatch for an install whose transport broke later.',
   RESEND_API_KEY:
     'Hosted email. Leave empty and set the SMTP block instead for a self-hosted install.',
+  SENDFLARE_API_KEY:
+    'Sendflare transactional email over HTTP. EMAIL_FROM must use a domain verified in Sendflare.',
   SMTP_HOST:
     'Set this and the magic link can be delivered — the whole of what a fresh install needs to let anyone in.',
   SMTP_SECURE:
@@ -282,8 +284,9 @@ const SECTIONS = [
     blurb: [
       'The front door is a magic link, so a deployment with no transport here',
       'has no way for anyone to log in. Set the SMTP block for a self-hosted',
-      'install; RESEND_API_KEY is the hosted alternative and wins if both are',
-      'set. None of this is required to get in — the first-run screen at /login',
+      'install; Sendflare and Resend are HTTP alternatives. Sendflare wins if',
+      'more than one provider is configured. None of this is required to get in —',
+      'the first-run screen at /login',
       'creates an account with a password — and none of it has to be a file:',
       'the dashboard stores a relay too, and a stored one wins over everything',
       'here.',
@@ -297,6 +300,7 @@ const SECTIONS = [
       'SMTP_PASS',
       'SMTP_FROM',
       'RESEND_API_KEY',
+      'SENDFLARE_API_KEY',
     ],
   },
   {

@@ -334,7 +334,7 @@ const serviceSchemas = {
     DATABASE_URL: url.optional(),
     // The worker's half of the dashboard-configurable settings (migration 0043;
     // the api's schema above carries the full argument). `enabled` makes the
-    // email drain prefer the stored transport over `SMTP_*`/`RESEND_API_KEY`;
+    // email drain prefer the stored transport over provider keys and `SMTP_*`;
     // `disabled` makes it read the environment and nothing else.
     //
     // **Both services must agree, and nothing here reconciles them** — they are
@@ -387,6 +387,9 @@ const serviceSchemas = {
     // send to the outbox, and the worker delivers it (docs snapshot 02 §5,
     // G-007). The API never holds this key — see FORBIDDEN_KEYS below.
     RESEND_API_KEY: secret.optional(),
+    // Sendflare's transactional HTTP API. Worker-only for the same outbox
+    // boundary as Resend: the api enqueues, and only the worker delivers.
+    SENDFLARE_API_KEY: secret.optional(),
     // Allows the "Name <addr@domain>" form Resend accepts, so not `.email()`.
     EMAIL_FROM: z.string().min(3).optional(),
     /**
@@ -573,6 +576,7 @@ const FORBIDDEN_KEYS: Readonly<Record<ServiceEnvName, readonly string[]>> = {
     // delivers it. The API therefore never holds the email provider credential
     // (docs snapshot 02 §5).
     'RESEND_API_KEY',
+    'SENDFLARE_API_KEY',
     // The SMTP relay password is the self-hosted spelling of the same
     // credential, and lands on the same side of the same boundary: the worker
     // delivers mail, so the worker is the only service that may hold it.
@@ -589,6 +593,7 @@ const FORBIDDEN_KEYS: Readonly<Record<ServiceEnvName, readonly string[]>> = {
     'AUTH_SECRET',
     'QUERY_SIGNING_PRIVATE_KEY',
     'RESEND_API_KEY',
+    'SENDFLARE_API_KEY',
     // The SMTP relay password is the self-hosted spelling of the same
     // credential, and lands on the same side of the same boundary: the worker
     // delivers mail, so the worker is the only service that may hold it.
@@ -678,6 +683,7 @@ const FORBIDDEN_KEYS: Readonly<Record<ServiceEnvName, readonly string[]>> = {
     // and the credential that could bypass it does not belong here (ADR-0030 D4).
     'CLICKHOUSE_MAINTENANCE_PASSWORD',
     'RESEND_API_KEY',
+    'SENDFLARE_API_KEY',
     // The SMTP relay password is the self-hosted spelling of the same
     // credential, and lands on the same side of the same boundary: the worker
     // delivers mail, so the worker is the only service that may hold it.
@@ -715,6 +721,7 @@ const FORBIDDEN_KEYS: Readonly<Record<ServiceEnvName, readonly string[]>> = {
     'AUTH_SECRET',
     'REALTIME_TOKEN_SIGNING_KEY',
     'RESEND_API_KEY',
+    'SENDFLARE_API_KEY',
     // The SMTP relay password is the self-hosted spelling of the same
     // credential, and lands on the same side of the same boundary: the worker
     // delivers mail, so the worker is the only service that may hold it.

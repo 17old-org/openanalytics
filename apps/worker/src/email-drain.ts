@@ -23,7 +23,7 @@ import {
 /**
  * Email delivery is a worker job (docs snapshot 02 §5): the API only writes the
  * send to the outbox, and this loop drains it through whichever transport is
- * configured — Resend, SMTP, or the log transport when neither is.
+ * configured — Sendflare, Resend, SMTP, or the log transport when none is.
  *
  * Since migration 0043 there are two places a transport can come from, and this
  * file is where they are reconciled. **A transport stored in the database wins
@@ -143,10 +143,15 @@ export function startEmailDrain(deps: EmailDrainDeps): EmailDrain {
     if (transport !== undefined && next === currentFingerprint) return transport
 
     transport = selectEmailTransport({
-      // A stored relay wins over `RESEND_API_KEY` as well as over `SMTP_*`. The
-      // env-vs-env tie still goes to Resend (`selectEmailTransport`), so nothing
-      // about our own deployment changes: it stores nothing here.
-      ...(stored ? {} : { apiKey: deps.env.RESEND_API_KEY }),
+      // A stored relay wins over provider keys as well as over `SMTP_*`. Among
+      // environment transports Sendflare wins, then Resend, then SMTP; every
+      // conflict is logged by `selectEmailTransport`.
+      ...(stored
+        ? {}
+        : {
+            sendflareApiKey: deps.env.SENDFLARE_API_KEY,
+            apiKey: deps.env.RESEND_API_KEY,
+          }),
       smtp: block,
       defaultFrom: deps.env.EMAIL_FROM ?? 'noreply@localhost',
       log,
@@ -161,6 +166,7 @@ export function startEmailDrain(deps: EmailDrainDeps): EmailDrain {
     // in the log finds nothing.
     if (transport.id === 'log') {
       const missing = [
+        ...(deps.env.SENDFLARE_API_KEY ? [] : ['SENDFLARE_API_KEY']),
         ...(deps.env.RESEND_API_KEY ? [] : ['RESEND_API_KEY']),
         ...(deps.env.SMTP_HOST ? [] : ['SMTP_HOST']),
       ]

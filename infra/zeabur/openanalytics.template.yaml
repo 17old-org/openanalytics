@@ -382,6 +382,8 @@ spec:
             default: 17old Analytics
           EMAIL_FROM:
             default: 17old Analytics <analytics@17-old.org>
+          SENDFLARE_API_KEY:
+            default: ''
 
     - name: OpenAnalytics Web
       template: PREBUILT

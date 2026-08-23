@@ -14,7 +14,7 @@
  * When no transport is configured the log transport is used, and that is the
  * default in tests (plan Milestone 2 item 2).
  *
- * ## Three transports, one seam
+ * ## Four transports, one seam
  *
  * Resend is what our own deployment runs, and it is not what a self-hosted
  * deployment can run: it needs an account, a verified domain and a key. Until
@@ -23,7 +23,8 @@
  * lowest-common-denominator transport every mail host on earth speaks, so it is
  * the one that makes the product installable.
  *
- * `selectEmailTransport` prefers Resend when both are configured. That is the
+ * `selectEmailTransport` prefers Sendflare, then Resend, when several provider
+ * keys are configured. That is the
  * conservative direction: our deployment sets `RESEND_API_KEY` and no SMTP
  * block, and a stray `SMTP_HOST` in a worker env must not silently reroute
  * production mail through a host nobody meant to send from.
@@ -59,6 +60,11 @@ export interface EmailTransport {
 }
 
 export interface ResendTransportConfig {
+  readonly apiKey: string
+  readonly defaultFrom: string
+}
+
+export interface SendflareTransportConfig {
   readonly apiKey: string
   readonly defaultFrom: string
 }
@@ -109,6 +115,91 @@ export function createResendTransport(
 
       const body = (await response.json().catch(() => null)) as { id?: string } | null
       return { ok: true, id: body?.id ?? 'unknown' }
+    },
+  }
+}
+
+const SENDFLARE_ENDPOINT = 'https://api.sendflare.com/v1/send'
+
+interface SendflareResponse {
+  readonly requestId?: string
+  readonly code?: number
+  readonly success?: boolean
+  readonly data?: {
+    readonly emailId?: string
+    /** The provider's published example currently spells this field this way. */
+    readonly emilId?: string
+  } | null
+}
+
+/**
+ * Sendflare's HTTP API behind the same typed transport boundary as Resend and
+ * SMTP. The provider can answer HTTP 200 with a non-zero business code, so an
+ * HTTP success alone is never treated as delivery.
+ */
+export function createSendflareTransport(
+  config: SendflareTransportConfig,
+  fetchImpl: typeof fetch = fetch,
+): EmailTransport {
+  return {
+    id: 'sendflare',
+    async send(message) {
+      let response: Response
+      try {
+        response = await fetchImpl(SENDFLARE_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${config.apiKey}`,
+            'content-type': 'application/json; charset=utf-8',
+          },
+          body: JSON.stringify({
+            from: message.from ?? config.defaultFrom,
+            to: message.to,
+            subject: message.subject,
+            body: message.html,
+          }),
+        })
+      } catch {
+        return { ok: false, reason: 'unavailable', detail: 'sendflare request failed' }
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          ok: false,
+          reason: 'unauthorized',
+          detail: `sendflare responded ${response.status}`,
+        }
+      }
+      if (response.status === 429 || response.status >= 500) {
+        return {
+          ok: false,
+          reason: 'unavailable',
+          detail: `sendflare responded ${response.status}`,
+        }
+      }
+      if (!response.ok) {
+        return { ok: false, reason: 'invalid', detail: `sendflare responded ${response.status}` }
+      }
+
+      const body = (await response.json().catch(() => null)) as SendflareResponse | null
+      if (body?.code === 100029) {
+        return { ok: false, reason: 'unauthorized', detail: 'sendflare rejected the credential' }
+      }
+      if (body?.code === 100025 || body?.code === 100031) {
+        return { ok: false, reason: 'unavailable', detail: `sendflare responded ${body.code}` }
+      }
+      if (body?.code !== 0 || body.success !== true) {
+        return {
+          ok: false,
+          reason: 'invalid',
+          detail: `sendflare responded ${body?.code ?? 'invalid_body'}`,
+        }
+      }
+
+      return {
+        ok: true,
+        id: body.data?.emailId ?? body.data?.emilId ?? body.requestId ?? 'unknown',
+      }
     },
   }
 }
@@ -329,6 +420,7 @@ export const SMTP_DEFAULT_PORT = 587
 export const SMTP_IMPLICIT_TLS_PORT = 465
 
 export interface SelectEmailTransportDeps {
+  readonly sendflareApiKey?: string | undefined
   readonly apiKey?: string | undefined
   readonly smtp?: SmtpEnvBlock | undefined
   readonly defaultFrom: string
@@ -338,15 +430,28 @@ export interface SelectEmailTransportDeps {
 }
 
 /**
- * Resend when a key is configured, SMTP when a host is, the log transport
- * otherwise. The log transport being the nothing-configured default is what
+ * Sendflare when its key is configured, otherwise Resend, SMTP, then the log
+ * transport. The log transport being the nothing-configured default is what
  * makes it the default in tests.
  *
- * Resend wins a tie, and says so in the log rather than silently: see the module
- * header for why that direction and not the other.
+ * Sendflare wins over Resend and SMTP; Resend still wins over SMTP. Every tie is
+ * logged rather than silently rerouting mail: see the module header for why.
  */
 export function selectEmailTransport(deps: SelectEmailTransportDeps): EmailTransport {
   const smtpHost = deps.smtp?.host
+  if (deps.sendflareApiKey) {
+    const ignored = [...(deps.apiKey ? ['resend'] : []), ...(smtpHost ? ['smtp'] : [])]
+    if (ignored.length > 0) {
+      deps.log?.('email_transport_conflict', {
+        chose: 'sendflare',
+        ignored: ignored.length === 1 ? ignored[0] : ignored,
+      })
+    }
+    return createSendflareTransport(
+      { apiKey: deps.sendflareApiKey, defaultFrom: deps.defaultFrom },
+      deps.fetchImpl,
+    )
+  }
   if (deps.apiKey) {
     if (smtpHost) {
       deps.log?.('email_transport_conflict', { chose: 'resend', ignored: 'smtp' })
