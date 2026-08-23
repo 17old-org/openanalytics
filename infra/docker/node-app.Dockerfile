@@ -4,7 +4,9 @@
 # pnpm workspace packages whose dependencies resolve through the root lockfile,
 # so an app-scoped context could not produce a reproducible install.
 #
-# Select the service with `--build-arg APP=query-gateway`.
+# Select another service with `--build-arg APP=query-gateway`. Worker is the
+# safe default for platforms such as Zeabur that build this file directly and
+# do not expose Docker build arguments in their source settings.
 
 # D-203 pins the exact patch locally, in CI and on the server. `24.x` would let
 # the runtime drift away from the version the lockfile was resolved against.
@@ -57,7 +59,7 @@ RUN test -s apps/tracker/bundle/oa.js || (echo "tracker bundle missing after bui
 
 # ---- runtime ------------------------------------------------------------
 FROM base AS runtime
-ARG APP
+ARG APP=worker
 ENV NODE_ENV=production
 # Fail at build time rather than shipping an image whose entrypoint does not
 # exist, which would otherwise only surface as a crash loop after deploy.
