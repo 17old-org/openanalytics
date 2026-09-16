@@ -166,7 +166,11 @@ export const eventPageSchema = z.strictObject({
 export const clientContextSchema = z.strictObject({
   sdk: z.enum(['web', 'node', 'wordpress', 'mobile']),
   sdk_version: z.string().min(1).max(EVENT_LIMITS.sdkVersionMaxLength),
-  /** Marks non-production traffic; the server keeps it out of billable usage. */
+  /**
+   * Deprecated and ignored (ADR-0068). Old snippets still send it, so the field
+   * stays accepted — `strictObject` would 400 them off the air — but the server
+   * treats the traffic as ordinary: visible and billable.
+   */
   test_mode: z.boolean().optional(),
 })
 
@@ -453,18 +457,6 @@ export const persistedEventSchema = z.strictObject({
   /** Server-computed usage class (D-101). Never echoed from the request. */
   billable: z.boolean(),
   /**
-   * Non-production traffic (ADR-0034, D6). **Server-set**, from
-   * `context.test_mode` or a valid preview session — the client's claim is an
-   * input to that decision, never the decision.
-   *
-   * It decides which table the worker writes to: `true` routes the event to
-   * `events_preview`, which no chart, rollup, session fact or realtime board
-   * reads. That is what makes the claim worthless to forge — a forger buys
-   * themselves 0 usage and 0 dashboard — and it is why the field can stay
-   * client-settable rather than needing a server-side gate of its own.
-   */
-  test_mode: z.boolean(),
-  /**
    * The no-code rule that produced this event, or `null` (ADR-0034, D5).
    *
    * Server-established: present only when the collector resolved the client's
@@ -496,6 +488,42 @@ export const persistedEventSchema = z.strictObject({
     utm_campaign: z.string().nullable(),
     utm_content: z.string().nullable(),
     utm_term: z.string().nullable(),
+    /**
+     * The click-id query key `referrer_domain` was DERIVED from, or `null`
+     * (ADR-0075, D-C1).
+     *
+     * Non-null means this row's source was inferred from a paid click id on the
+     * landing URL rather than reported by the browser, which is a distinction a
+     * customer is entitled to be able to see. Never the click id's value — that
+     * stays `[redacted]` (D-C2).
+     *
+     * **Defaulted rather than required, and the default is the rollout.** The
+     * queue holds envelopes the previous collector wrote, and a strict object
+     * with a required field would fail every one of them the moment the new
+     * worker starts — a full-queue parse failure, not a graceful one. With a
+     * default, an in-flight envelope parses as "nothing was inferred", which is
+     * exactly what was true when it was written.
+     */
+    click_id_source: z.string().max(64).nullable().default(null),
+    /**
+     * The `?ref=` value `referrer_domain` was DERIVED from, or `null`
+     * (ADR-0077, D-R1).
+     *
+     * Non-null means the source was named by a tag on the landing URL — the
+     * convention Product Hunt and the directory ecosystem link with — rather
+     * than reported by the browser. Unlike `click_id_source`, which holds a key
+     * from a fixed list, this holds the **value**, because for `ref` the key is
+     * always `ref` and the value is the whole of the signal. It is normalized
+     * (trimmed, lowercased, capped) and never a click id: the two columns are
+     * mutually exclusive by construction, since both fill the same field and
+     * only one inference runs.
+     *
+     * **Defaulted rather than required, for the same reason as
+     * `click_id_source`:** the queue holds envelopes the previous collector
+     * wrote, and a required field in a strict object would fail every one of
+     * them the moment the new worker starts.
+     */
+    ref_source: z.string().max(64).nullable().default(null),
   }),
 
   properties: eventPropertiesSchema,
@@ -526,6 +554,17 @@ export type PersistedEvent = z.infer<typeof persistedEventSchema>
  */
 export const trackerConfigSchema = z.strictObject({
   config_version: z.number().int().min(1),
+  /**
+   * Present and `true` while collection for this site is paused (ADR-0074,
+   * amendment 2): every batch would be refused at the door, so the tracker
+   * sends nothing and keeps only its ordinary config revalidation as the pulse
+   * that notices collection resuming — ≤5 minutes either way. Absent means
+   * collecting. The product never sets it: the verdict comes from whatever
+   * collector extension a deployment mounts, and a self-hosted install that
+   * mounts none never pauses a tracker. The paused state is part of the ETag,
+   * so a cached `true` cannot outlive the state it describes.
+   */
+  collection_paused: z.boolean().optional(),
   site_timezone: z.string().min(1),
   allowed_domains: z.array(z.string().min(1)).max(100),
   /** Query keys stripped from URLs before they leave the browser. */

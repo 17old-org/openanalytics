@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "open-analytics": {
+      "url": "https://api.getopen.so/mcp"
+    }
+  }
+}

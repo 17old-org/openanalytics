@@ -14,7 +14,6 @@ import {
   newId,
   publishEventDefinition,
   purgeSitePostgres,
-  readPreviewRules,
   resolveIngestConfig,
   rollbackEventDefinition,
   saveEventDefinitionVersion,
@@ -629,39 +628,6 @@ describeIfPostgres('event definitions', () => {
       await archiveEventDefinition(db, { id: definition.id, siteId })
       expect((await resolveIngestConfig(db, rawToken))?.noCodeRules).toEqual([])
     })
-
-    it('reads a draft version for a preview, and only on its own site', async () => {
-      const siteId = await makeSite()
-      const other = await makeSite()
-      const { definition } = await createEventDefinition(db, {
-        siteId,
-        eventName: 'preview_only',
-        content: content({ displayName: 'V1' }),
-      })
-      await saveEventDefinitionVersion(db, {
-        id: definition.id,
-        siteId,
-        content: content({
-          displayName: 'V2 draft',
-          rules: [{ rule_id: RULE_B, trigger: 'submit', selector: 'form' }],
-          propertySchema: [],
-          displayTemplate: null,
-        }),
-      })
-
-      const draft = await readPreviewRules(db, {
-        siteId,
-        definitionId: definition.id,
-        version: 2,
-      })
-      expect(draft?.map((row) => row.rule.rule_id)).toEqual([RULE_B])
-
-      // A token naming another site cannot read this definition's drafts, even
-      // with the right definition id.
-      expect(
-        await readPreviewRules(db, { siteId: other, definitionId: definition.id, version: 2 }),
-      ).toBeNull()
-    })
   })
 
   describe('deletion', () => {
@@ -686,7 +652,7 @@ describeIfPostgres('event definitions', () => {
         deletionRequestId: started.deletionRequestId,
       })
       // 63, not 64: `billing_transfer_offers` is a target the hosted surface registers (`CLOUD_DELETION_EXTENSION`), so this is the set a build without it erases.
-      expect(targets).toHaveLength(63)
+      expect(targets).toHaveLength(62)
       expect(targets).toHaveLength(SITE_DELETION_TARGETS.length)
       const names = new Set(targets.map((t) => `${t.store}:${t.target}`))
       expect(names.has('postgres:event_definitions')).toBe(true)

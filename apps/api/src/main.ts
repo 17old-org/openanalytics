@@ -13,6 +13,7 @@ import {
   createCredentialVault,
   createOpenAiChatClient,
   createS3ObjectStorage,
+  createPolarRevenueAdapter,
   createStripeRevenueAdapter,
   type CredentialVault,
   type ObjectStorage,
@@ -285,7 +286,17 @@ let revenue:
 if (env.OA_CREDENTIAL_KEYRING) {
   try {
     vault = createCredentialVault(env.OA_CREDENTIAL_KEYRING)
-    revenue = { vault, adapters: createRevenueAdapterRegistry([createStripeRevenueAdapter()]) }
+    revenue = {
+      vault,
+      adapters: createRevenueAdapterRegistry([
+        createStripeRevenueAdapter(),
+        // The second provider. Registered here and in the worker from the same
+        // list the catalog advertises — a credential naming a provider with no
+        // adapter fails `adapter_unavailable` rather than half-working, so the
+        // two must be flipped together.
+        createPolarRevenueAdapter(),
+      ]),
+    }
     // The active version's *label* — never material. It is what an operator
     // mid-rotation needs to confirm from a startup log.
     logger.info('revenue_mounted', {

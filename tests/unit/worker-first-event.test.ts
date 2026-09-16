@@ -65,7 +65,6 @@ const BASE: PersistedEvent = {
   usage_window_id: null,
   billing_grace: false,
   billable: true,
-  test_mode: false,
   rule_id: null,
   rule_version: null,
   anonymous_id: 'anon-1',
@@ -80,6 +79,8 @@ const BASE: PersistedEvent = {
     utm_campaign: null,
     utm_content: null,
     utm_term: null,
+    click_id_source: null,
+    ref_source: null,
   },
   properties: {},
   context: {

@@ -1,6 +1,6 @@
 import { serve } from '@hono/node-server'
 import { createServiceMetrics } from '@openanalytics/observability'
-import { createDatabase, createPool, readPreviewRules } from '@openanalytics/postgres'
+import { createDatabase, createPool } from '@openanalytics/postgres'
 import {
   createEventStreamQueue,
   createQueueClient,
@@ -98,26 +98,26 @@ const configStore =
         ...(cloud ? { decorate: (resolved) => cloud.decorateConfig(resolved) } : {}),
       })
 
-const previewDb = db
 const trackerConfigStore =
   configStore === null
     ? undefined
     : createTrackerConfigStore(
         configStore,
-        // Uncached by construction: a draft version's rules must never enter the
-        // ingest-config cache, which real visitors read from (ADR-0034, D6).
-        previewDb === null
-          ? undefined
-          : async (input) => {
-              const rules = await readPreviewRules(previewDb, input)
-              return rules === null
-                ? null
-                : rules.map((row) => ({
-                    ...row.rule,
-                    name: row.eventName,
-                    version: row.version,
-                  }))
-            },
+        // The same verdicts the event path uses (ADR-0074 amendments):
+        // configuration stops when admission stops, so a lapsed site's tracker
+        // stands down instead of knocking for the whole suspension — and an
+        // over-quota site's configuration carries the paused light, so its
+        // tracker waits on a five-minute pulse instead of a refused batch per
+        // pageview. Without the extension, suspended serves nothing and
+        // nothing ever pauses.
+        cloud
+          ? {
+              admitSuspended: (input) => cloud.admitSuspended(input),
+              ...(cloud.collectionPaused
+                ? { collectionPaused: (input) => cloud.collectionPaused!(input) }
+                : {}),
+            }
+          : {},
       )
 
 const queueClient =
@@ -200,9 +200,6 @@ const app = createApp({
   metrics,
   ...(trackerConfigStore === undefined ? {} : { trackerConfigStore }),
   ...(trackerScript === undefined ? {} : { trackerScript }),
-  ...(env.PREVIEW_TOKEN_VERIFY_KEY === undefined
-    ? {}
-    : { previewVerifyKey: env.PREVIEW_TOKEN_VERIFY_KEY }),
   ...(ingest === undefined ? {} : { ingest }),
 })
 

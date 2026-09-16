@@ -1,4 +1,4 @@
-import { loadTrackerConfig } from './config.ts'
+import { isSiteGone, loadTrackerConfig } from './config.ts'
 import { resolveIgnore, showIgnoreNotice } from './ignore.ts'
 import { installTracker, optionsFromScript } from './install.ts'
 import { memoryStorage, safeStorage } from './storage.ts'
@@ -75,6 +75,15 @@ function boot(): void {
     return
   }
 
+  // ADR-0074: a fresh gone-marker — the config endpoint answered 404, so no
+  // live site matches this key — and the page installs nothing: no listeners,
+  // no timers, no queue, no request of any kind. The marker has a one-hour
+  // TTL, after which this check passes and the ordinary boot below re-probes
+  // through the config fetch; a site that came back resumes on its own. In
+  // strict mode `localStore` is the memory one, so the check is simply false
+  // there and the stand-down happens per page through `applyConfig` instead.
+  if (isSiteGone(localStore, Date.now())) return
+
   // One detection, used by both the tracker's transport and the config fetch.
   // The previous asymmetry — a `fetchImpl` for the config, none for the tracker —
   // is what left production with no transport at all.
@@ -87,17 +96,6 @@ function boot(): void {
       ? { beaconImpl: (url: string, payload: string) => win.navigator.sendBeacon(url, payload) }
       : {}
 
-  // A rule preview (ADR-0034, D6). Read from the page's own URL, which is where
-  // the dashboard put it. Its presence also makes the whole page's traffic
-  // `test_mode`: preview events are non-billable and are excluded from every
-  // production read, which is what lets a preview run against a real site.
-  let previewToken = ''
-  try {
-    previewToken = new URLSearchParams(win.location?.search ?? '').get('oa_preview') ?? ''
-  } catch {
-    /* a malformed query string is no preview */
-  }
-
   const configDeps = {
     collectorUrl: options.collectorUrl,
     trackingKey: options.trackingKey,
@@ -108,7 +106,6 @@ function boot(): void {
     storage: localStore,
     now: () => Date.now(),
     ...fetchDeps,
-    ...(previewToken === '' ? {} : { previewToken }),
   }
 
   /**
@@ -136,12 +133,10 @@ function boot(): void {
     ...options,
     ...fetchDeps,
     ...beaconDeps,
-    ...(previewToken === '' ? {} : { testMode: true }),
     // ADR-0034 D4: a single-page app fetches configuration once and would never
-    // revalidate at any TTL. Not wired during a preview — that path bypasses the
-    // cache by design, so every route change would be an unconditional request
-    // for a draft rule set nobody asked for again.
-    ...(previewToken === '' ? { onRouteChange: () => syncConfig() } : {}),
+    // revalidate at any TTL. A route change is the one moment a SPA reliably
+    // offers to ask again.
+    onRouteChange: () => syncConfig(),
   })
 
   syncConfig()

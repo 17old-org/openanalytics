@@ -13,8 +13,19 @@ not a promise. What it is no longer is a file nobody has run.
 - **Four DNS records**, all pointing at that server. The dashboard, the api, the
   collector and the realtime stream are four hostnames, not four paths. See
   [SELF-HOSTING.md](../../SELF-HOSTING.md#four-names-and-why-it-is-four) for why.
-- About 4 GB of RAM for the stack, on top of whatever Coolify itself uses, and
-  10 GB of disk for the images.
+- About 4 GB of RAM for the stack, on top of whatever Coolify itself uses.
+- **25 GB of free disk**, or 15 GB and one command before each upgrade. A release
+  is about 13 GB of images, and Coolify pulls the new set before it releases the
+  old one, so an upgrade holds two generations at once. Measured on a 38 GB box:
+  it installed cleanly, upgraded once, and ran out during the second, part-way
+  through extracting a layer. The error names a file inside `node_modules` and
+  never names the disk.
+
+  On the smaller box, clear the previous release first:
+
+  ```sh
+  docker image prune -a -f      # keeps whatever the running containers use
+  ```
 
 ## 1. Create the resource
 
@@ -46,7 +57,7 @@ has one dot before `coolify`, the extension is `.yml` and not `.yaml`.
 on the create screen, and on 4.3.2 the field does not appear afterwards either.
 It does not matter, and the reason is worth knowing rather than working around:
 **the images are pinned in the compose file, not by the checkout.** Every
-`image:` line here reads `${OA_IMAGE_TAG:-v0.4.2}`, so a clone of `main` runs
+`image:` line here reads `${OA_IMAGE_TAG:-v0.5.0}`, so a clone of `main` runs
 the release named in the file it just cloned. What a tag would add is that the
 env templates and the migrations come from the same commit as well; `main`
 carries them too, right up until the next change lands on it.
@@ -100,7 +111,7 @@ dig +short app.<domain> A
 **Environment Variables** in the left menu. Most of them are already filled:
 every password, every base64 secret, every FQDN. Do not touch those.
 
-**Two things are deliberately not there.** The three signing key pairs, and the
+**Two things are deliberately not there.** The two signing key pairs, and the
 credential keyring that encrypts connected provider credentials. A one-shot step
 inside the stack makes both and hands them over as files, because no generator
 on this platform can produce either: a keypair whose halves must match across two

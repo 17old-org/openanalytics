@@ -113,8 +113,13 @@ keepable. Not before.
 5. Watch it. **A release whose workflow failed is a tag pointing at images that
    do not exist**, and the failure mode for whoever tries it is a `docker
 compose pull` that cannot find a manifest.
-6. Write the release notes on the GitHub release. What changed, and — first,
-   before anything else — whatever an upgrading operator has to do by hand.
+6. Add the entry to `CHANGELOG.md` in the same commit as the version bump. It
+   opens with what an upgrading operator has to do by hand, or with
+   **Upgrade notes: none** — that line is the first thing somebody looks for
+   and the reason the file exists rather than a list of commits.
+7. Write the release notes on the GitHub release. They are the CHANGELOG entry
+   for this version, pasted: two places that say different things about one
+   release is the drift this file exists to prevent.
 
 **Pre-releases** are `vX.Y.Z-rc.N`. They publish the same ten images under the
 pre-release tag and deliberately do not move `latest`, so the way to test the

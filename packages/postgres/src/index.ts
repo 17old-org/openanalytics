@@ -21,12 +21,14 @@ export {
   markOutboxFailed,
   readOutboxBacklog,
   readOutboxDelivery,
+  reclaimStalledOutbox,
   type ClaimedOutboxRow,
   type OutboxBacklogRow,
   type OutboxDeliveryRow,
   type EnqueueOutboxInput,
   type EnqueueOutboxResult,
   type MarkOutboxFailedOptions,
+  type ReclaimStalledOutboxOptions,
 } from './repositories/outbox.ts'
 
 export {
@@ -459,7 +461,6 @@ export {
   listEventDisplayNames,
   listPublishedRules,
   publishEventDefinition,
-  readPreviewRules,
   rollbackEventDefinition,
   saveEventDefinitionVersion,
   type CreateEventDefinitionInput,

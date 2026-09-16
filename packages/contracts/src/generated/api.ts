@@ -1039,6 +1039,58 @@ export interface paths {
                  *     honestly serve is refused with `RESOLUTION_NOT_AVAILABLE`.
                  */
                 resolution?: components["parameters"]["OverviewResolution"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: {
                 /**
@@ -1107,6 +1159,58 @@ export interface paths {
                  *     `RESOLUTION_NOT_AVAILABLE`.
                  */
                 resolution?: components["parameters"]["TimeseriesResolution"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: {
                 /**
@@ -1169,6 +1273,74 @@ export interface paths {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description Which measure decides the top-N cut on the pages report (ADR-0075,
+                 *     D-E2).
+                 *
+                 *     **Sorting is a server parameter and not a client concern**, because the
+                 *     cut and the sort are one decision: a client that re-sorted a top-100-by-
+                 *     views page by `exits` would present that page's busiest exits as "the
+                 *     site's busiest exits", and for any site with a long tail those are
+                 *     different sets. The column header has to change the request.
+                 *
+                 *     `views` is the default and leaves the read byte-identical to what it was
+                 *     before this parameter existed. `entrances` and `exits` let the session
+                 *     read drive the cut instead, and a path that only the session read
+                 *     returned enters the list with `views: 0`.
+                 */
+                sort?: components["parameters"]["PagesSort"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: {
                 /**
@@ -1225,6 +1397,58 @@ export interface paths {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: {
                 /**
@@ -1281,6 +1505,58 @@ export interface paths {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: {
                 /**
@@ -1342,6 +1618,58 @@ export interface paths {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: {
                 /**
@@ -1855,6 +2183,58 @@ export interface paths {
                  *     honestly serve is refused with `RESOLUTION_NOT_AVAILABLE`.
                  */
                 resolution?: components["parameters"]["OverviewResolution"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: never;
             path: {
@@ -1894,6 +2274,58 @@ export interface paths {
                  *     `RESOLUTION_NOT_AVAILABLE`.
                  */
                 resolution?: components["parameters"]["TimeseriesResolution"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: never;
             path: {
@@ -1935,6 +2367,74 @@ export interface paths {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description Which measure decides the top-N cut on the pages report (ADR-0075,
+                 *     D-E2).
+                 *
+                 *     **Sorting is a server parameter and not a client concern**, because the
+                 *     cut and the sort are one decision: a client that re-sorted a top-100-by-
+                 *     views page by `exits` would present that page's busiest exits as "the
+                 *     site's busiest exits", and for any site with a long tail those are
+                 *     different sets. The column header has to change the request.
+                 *
+                 *     `views` is the default and leaves the read byte-identical to what it was
+                 *     before this parameter existed. `entrances` and `exits` let the session
+                 *     read drive the cut instead, and a path that only the session read
+                 *     returned enters the list with `views: 0`.
+                 */
+                sort?: components["parameters"]["PagesSort"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: never;
             path: {
@@ -1963,6 +2463,58 @@ export interface paths {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: never;
             path: {
@@ -1991,6 +2543,58 @@ export interface paths {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: never;
             path: {
@@ -2023,6 +2627,58 @@ export interface paths {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: never;
             path: {
@@ -3139,41 +3795,6 @@ export interface paths {
          *     says which one is live.
          */
         post: operations["rollbackSiteEventDefinition"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/sites/{site_id}/event-definitions/{definition_id}/preview": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                site_id: components["parameters"]["SiteIdPath"];
-                definition_id: string;
-            };
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Start a preview of an unpublished version. Requires `site:settings`.
-         * @description Returns a short-lived signed token and writes nothing. Append it to the
-         *     site's own URL as `?oa_preview=<token>` and load the page: the tracker
-         *     passes it to `GET /v1/tracker/config`, which answers with **this draft
-         *     version's rules** instead of the published set, uncached.
-         *
-         *     Events produced during a preview are marked `test_mode`. They are
-         *     non-billable and are excluded from every production read path — the
-         *     chart, the rollups, the realtime board and the usage ledger — so a
-         *     preview can be run against a real production site without polluting it.
-         *
-         *     `site:settings` rather than plain membership, because a preview puts
-         *     unpublished rules into a real browser on the customer's real site, which
-         *     is the same class of act as publishing them, briefly.
-         */
-        post: operations["previewSiteEventDefinition"];
         delete?: never;
         options?: never;
         head?: never;
@@ -5143,7 +5764,12 @@ export interface components {
             /** @enum {string} */
             sdk: "web" | "node" | "wordpress" | "mobile";
             sdk_version: string;
-            /** @description Marks non-production traffic; kept out of billable usage. */
+            /**
+             * @deprecated
+             * @description Deprecated and ignored (ADR-0068). Old snippets still send it, so
+             *     the field stays accepted; the traffic is ordinary — visible and
+             *     billable.
+             */
             test_mode?: boolean;
         };
         /**
@@ -5600,11 +6226,9 @@ export interface components {
                 /** @description The canonical event name a match produces. */
                 name: components["schemas"]["EventName"];
                 /**
-                 * @description The definition version this rule came from. Sent so a preview
-                 *     and a published rule set are distinguishable in the events
-                 *     they produce, and so "which rules was this browser running"
-                 *     has an answer that does not depend on guessing from the
-                 *     config epoch.
+                 * @description The definition version this rule came from, so "which rules
+                 *     was this browser running" has an answer that does not depend
+                 *     on guessing from the config epoch.
                  */
                 version: number;
                 /** @enum {string} */
@@ -5702,10 +6326,44 @@ export interface components {
                  *     port. Null when the visitor arrived with no referrer and when
                  *     the referrer was one of the site's own hosts; both are Direct
                  *     (ADR-0028).
+                 *
+                 *     It may also be a source **derived from the landing URL** when
+                 *     the browser sent no referrer at all: from a `?ref=` tag
+                 *     (ADR-0077, D-R1) or from a paid click id (ADR-0075, D-C1).
+                 *     `ref_source` and `click_id_source` below are how a derived
+                 *     value is told from a reported one. A derived value is usually a
+                 *     host, and for a `?ref=` label with no known host it is the label
+                 *     itself.
                  */
                 referrer_domain: string | null;
-                /** @description Null whenever `referrer_domain` is. */
+                /**
+                 * @description Null whenever `referrer_domain` is, and null for a derived
+                 *     domain — a tag or a click id names the source, not a page on
+                 *     it.
+                 */
                 referrer_path: string | null;
+                /**
+                 * @description The click-id query key `referrer_domain` was derived from
+                 *     (`gclid`, `fbclid`, `msclkid`, `twclid`, `ttclid`, `li_fat_id`,
+                 *     `igshid`, `yclid`, `gclsrc`), or null when the browser reported
+                 *     the referrer itself (ADR-0075, D-C1).
+                 *
+                 *     Never the click id's **value**: that is stored `[redacted]` like
+                 *     every other opaque query value and stays that way (D-C2). The
+                 *     presence of the key is the whole signal.
+                 */
+                click_id_source: string | null;
+                /**
+                 * @description The normalized `?ref=` value `referrer_domain` was derived from,
+                 *     or null when the browser reported the referrer itself
+                 *     (ADR-0077, D-R1).
+                 *
+                 *     Holds the **value** where `click_id_source` holds a key: a
+                 *     `ref` tag has one key and carries its whole signal in the value.
+                 *     The two are mutually exclusive — both fill `referrer_domain`,
+                 *     and only one inference runs.
+                 */
+                ref_source: string | null;
                 utm_source: string | null;
                 utm_medium: string | null;
                 utm_campaign: string | null;
@@ -5963,6 +6621,48 @@ export interface components {
              *     own page views, so `visitors <= views` per row.
              */
             visitors: number;
+            /**
+             * Format: int64
+             * @description Sessions that BEGAN on this path (ADR-0075, D-E1). Session-grain,
+             *     read from the session facts rather than from the pages rollup —
+             *     entry, exit and bounce are not additive over an incremental view,
+             *     which is why they were absent until the session finalizer shipped.
+             *
+             *     `null` means **not measured on this response**, and it has exactly
+             *     three causes: the surface does not ask for session metrics (the
+             *     public share and the widget read do not), the decoration read was
+             *     truncated so this path fell outside the window it covered, or the
+             *     row came from an import, which carries no sessions. `0` is a
+             *     measurement: no session began here.
+             */
+            entrances: number | null;
+            /**
+             * Format: int64
+             * @description Sessions that ENDED on this path. Same grain, same source and the
+             *     same meaning of `null` as `entrances`.
+             *
+             *     There is deliberately no `exit_rate`: the only denominator available
+             *     for one is `views`, which is event-grain, may include imported days
+             *     that have no sessions at all, and would therefore be a ratio between
+             *     two different populations. `exits` and `views` are both on this row
+             *     and a client that wants that ratio can form it knowing what it did.
+             */
+            exits: number | null;
+            /**
+             * Format: int64
+             * @description Sessions that began on this path and were not engaged. Derived at
+             *     read (`countIf(engaged = 0)`), never stored twice. Counted on the
+             *     ENTRY only, because a bounce is a property of where a visit began —
+             *     so `bounces <= entrances` always.
+             */
+            bounces: number | null;
+            /**
+             * @description `bounces / entrances`, in `[0, 1]`. Its denominator is `entrances`
+             *     on this same row rather than an implied one, which is the whole
+             *     reason it is safe to compute here. `null` when `entrances` is 0 or
+             *     unmeasured — a rate with no denominator is not zero.
+             */
+            bounce_rate: number | null;
         };
         AnalyticsPagesResponse: {
             meta: components["schemas"]["AnalyticsMeta"];
@@ -8373,6 +9073,74 @@ export interface components {
         /** @description Maximum rows to return for a top-N report. */
         TopNLimit: number;
         /**
+         * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+         *     of `{dimension, operator, values}`.
+         *
+         *     ## The grain rule, in one sentence
+         *
+         *     **A filter selects sessions, and the report then describes everything
+         *     those sessions did.**
+         *
+         *     A visitor who arrives from YouTube and reads five pages shows five pages
+         *     under `Source: youtube.com`, not one. Only the landing pageview carries
+         *     the referrer, so filtering pageviews instead would report that YouTube
+         *     sends people who bounce — the opposite of the truth. The same rule holds
+         *     on every surface: this parameter means the same thing on the dashboard,
+         *     on `/v1/read` and through MCP.
+         *
+         *     ## Grammar
+         *
+         *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+         *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+         *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+         *       ignored clause.
+         *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+         *       `in`.
+         *     - `values` — strings, at most 128 characters each. Matched exactly, on
+         *       the value the SESSION ENTRY carried.
+         *
+         *     Clauses are combined with **AND only**. There is no OR across
+         *     dimensions, no negation, no regex and no free text in v1. Within one
+         *     dimension the values are an OR, which is what `in` is; two clauses on
+         *     the same dimension are merged into one rather than intersected to
+         *     nothing.
+         *
+         *     ## What a filtered read costs and cannot do
+         *
+         *     A filtered read is answered from the event and session facts rather than
+         *     from a rollup, so it is capped at **92 days** — a longer range is
+         *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+         *     **live-only**: a staged provider day carries no session for a
+         *     session-scoped filter to select, so a range overlapping imported days
+         *     comes back with `meta.partial: true`.
+         *
+         *     Events that carry no client session hint — a server-side SDK call, a
+         *     widget write — belong to no session and are therefore outside every
+         *     filtered read by construction, which is why a filtered total can sit
+         *     below the unfiltered one by more than the filter alone explains.
+         *
+         *     Custom events and performance do not accept a filter yet; sending one is
+         *     `VALIDATION_FAILED` naming the report.
+         * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+         */
+        AnalyticsFilters: string;
+        /**
+         * @description Which measure decides the top-N cut on the pages report (ADR-0075,
+         *     D-E2).
+         *
+         *     **Sorting is a server parameter and not a client concern**, because the
+         *     cut and the sort are one decision: a client that re-sorted a top-100-by-
+         *     views page by `exits` would present that page's busiest exits as "the
+         *     site's busiest exits", and for any site with a long tail those are
+         *     different sets. The column header has to change the request.
+         *
+         *     `views` is the default and leaves the read byte-identical to what it was
+         *     before this parameter existed. `entrances` and `exits` let the session
+         *     read drive the cut instead, and a path that only the session read
+         *     returned enters the list with `views: 0`.
+         */
+        PagesSort: "views" | "entrances" | "exits";
+        /**
          * @description How many hours back the recent-visitor window reaches. Capped well below
          *     the other read ranges because these operations read the event facts per
          *     visitor rather than a rollup.
@@ -9681,6 +10449,58 @@ export interface operations {
                  *     honestly serve is refused with `RESOLUTION_NOT_AVAILABLE`.
                  */
                 resolution?: components["parameters"]["OverviewResolution"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: {
                 /**
@@ -9749,6 +10569,58 @@ export interface operations {
                  *     `RESOLUTION_NOT_AVAILABLE`.
                  */
                 resolution?: components["parameters"]["TimeseriesResolution"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: {
                 /**
@@ -9811,6 +10683,74 @@ export interface operations {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description Which measure decides the top-N cut on the pages report (ADR-0075,
+                 *     D-E2).
+                 *
+                 *     **Sorting is a server parameter and not a client concern**, because the
+                 *     cut and the sort are one decision: a client that re-sorted a top-100-by-
+                 *     views page by `exits` would present that page's busiest exits as "the
+                 *     site's busiest exits", and for any site with a long tail those are
+                 *     different sets. The column header has to change the request.
+                 *
+                 *     `views` is the default and leaves the read byte-identical to what it was
+                 *     before this parameter existed. `entrances` and `exits` let the session
+                 *     read drive the cut instead, and a path that only the session read
+                 *     returned enters the list with `views: 0`.
+                 */
+                sort?: components["parameters"]["PagesSort"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: {
                 /**
@@ -9873,6 +10813,58 @@ export interface operations {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: {
                 /**
@@ -9935,6 +10927,58 @@ export interface operations {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: {
                 /**
@@ -9997,6 +11041,58 @@ export interface operations {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: {
                 /**
@@ -10758,6 +11854,58 @@ export interface operations {
                  *     honestly serve is refused with `RESOLUTION_NOT_AVAILABLE`.
                  */
                 resolution?: components["parameters"]["OverviewResolution"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: never;
             path: {
@@ -10800,6 +11948,58 @@ export interface operations {
                  *     `RESOLUTION_NOT_AVAILABLE`.
                  */
                 resolution?: components["parameters"]["TimeseriesResolution"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: never;
             path: {
@@ -10836,6 +12036,74 @@ export interface operations {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description Which measure decides the top-N cut on the pages report (ADR-0075,
+                 *     D-E2).
+                 *
+                 *     **Sorting is a server parameter and not a client concern**, because the
+                 *     cut and the sort are one decision: a client that re-sorted a top-100-by-
+                 *     views page by `exits` would present that page's busiest exits as "the
+                 *     site's busiest exits", and for any site with a long tail those are
+                 *     different sets. The column header has to change the request.
+                 *
+                 *     `views` is the default and leaves the read byte-identical to what it was
+                 *     before this parameter existed. `entrances` and `exits` let the session
+                 *     read drive the cut instead, and a path that only the session read
+                 *     returned enters the list with `views: 0`.
+                 */
+                sort?: components["parameters"]["PagesSort"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: never;
             path: {
@@ -10872,6 +12140,58 @@ export interface operations {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: never;
             path: {
@@ -10908,6 +12228,58 @@ export interface operations {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: never;
             path: {
@@ -10944,6 +12316,58 @@ export interface operations {
                 timezone: components["parameters"]["QueryTimezone"];
                 /** @description Maximum rows to return for a top-N report. */
                 limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description A **session-scoped** filter set (ADR-0075), as a URL-encoded JSON array
+                 *     of `{dimension, operator, values}`.
+                 *
+                 *     ## The grain rule, in one sentence
+                 *
+                 *     **A filter selects sessions, and the report then describes everything
+                 *     those sessions did.**
+                 *
+                 *     A visitor who arrives from YouTube and reads five pages shows five pages
+                 *     under `Source: youtube.com`, not one. Only the landing pageview carries
+                 *     the referrer, so filtering pageviews instead would report that YouTube
+                 *     sends people who bounce — the opposite of the truth. The same rule holds
+                 *     on every surface: this parameter means the same thing on the dashboard,
+                 *     on `/v1/read` and through MCP.
+                 *
+                 *     ## Grammar
+                 *
+                 *     - `dimension` — one of `referrer_domain`, `country`, `city`,
+                 *       `device_type`. The vocabulary is **closed**: an unknown dimension is a
+                 *       `VALIDATION_FAILED` naming it in `details.dimension`, never a silently
+                 *       ignored clause.
+                 *     - `operator` — `eq` (exactly one value) or `in` (up to 20). Absent means
+                 *       `in`.
+                 *     - `values` — strings, at most 128 characters each. Matched exactly, on
+                 *       the value the SESSION ENTRY carried.
+                 *
+                 *     Clauses are combined with **AND only**. There is no OR across
+                 *     dimensions, no negation, no regex and no free text in v1. Within one
+                 *     dimension the values are an OR, which is what `in` is; two clauses on
+                 *     the same dimension are merged into one rather than intersected to
+                 *     nothing.
+                 *
+                 *     ## What a filtered read costs and cannot do
+                 *
+                 *     A filtered read is answered from the event and session facts rather than
+                 *     from a rollup, so it is capped at **92 days** — a longer range is
+                 *     `RANGE_TOO_LARGE`, named and immediate, never a timeout. It is also
+                 *     **live-only**: a staged provider day carries no session for a
+                 *     session-scoped filter to select, so a range overlapping imported days
+                 *     comes back with `meta.partial: true`.
+                 *
+                 *     Events that carry no client session hint — a server-side SDK call, a
+                 *     widget write — belong to no session and are therefore outside every
+                 *     filtered read by construction, which is why a filtered total can sit
+                 *     below the unfiltered one by more than the filter alone explains.
+                 *
+                 *     Custom events and performance do not accept a filter yet; sending one is
+                 *     `VALIDATION_FAILED` naming the report.
+                 * @example [{"dimension":"country","operator":"in","values":["US","CA"]}]
+                 */
+                filters?: components["parameters"]["AnalyticsFilters"];
             };
             header?: never;
             path: {
@@ -12288,63 +13712,6 @@ export interface operations {
             };
             /** @description Someone else published first (`EVENT_DEFINITION_VERSION_CONFLICT`). */
             409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-        };
-    };
-    previewSiteEventDefinition: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                site_id: components["parameters"]["SiteIdPath"];
-                definition_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": {
-                    /** @description The version to preview. Usually an unpublished draft. */
-                    version: number;
-                };
-            };
-        };
-        responses: {
-            /** @description A preview token, valid for 15 minutes. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        /** @description Opaque to the client; pass it through as `oa_preview`. */
-                        token: string;
-                        /** Format: date-time */
-                        expires_at: string;
-                        version: number;
-                    };
-                };
-            };
-            400: components["responses"]["ValidationFailed"];
-            401: components["responses"]["Unauthenticated"];
-            403: components["responses"]["Forbidden"];
-            /** @description No such definition or version (`NOT_FOUND`). */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorEnvelope"];
-                };
-            };
-            /** @description This deployment has no preview signing key (`SERVICE_UNAVAILABLE`). */
-            503: {
                 headers: {
                     [name: string]: unknown;
                 };

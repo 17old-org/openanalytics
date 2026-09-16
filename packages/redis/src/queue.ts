@@ -197,4 +197,20 @@ export interface QueueMaintenance {
    * conflated them would page on an idle system.
    */
   oldestPendingAgeMs(now: Date): Promise<number | null>
+
+  /**
+   * Used memory as a fraction of `maxmemory`, or null when the instance is
+   * configured without a limit.
+   *
+   * Null rather than zero, and the difference is the whole point: an unlimited
+   * instance has no ratio to report, while zero would read as "empty" — the
+   * healthiest possible value — on the one configuration where running out of
+   * memory takes the host down with it rather than being refused politely.
+   *
+   * This is the series nothing in this repository published on 2026-08-22, when
+   * the queue instance reached 100 % of `maxmemory`, `noeviction` turned every
+   * write into an error, and the collector returned 503 for twenty-five minutes
+   * with no warning of any kind beforehand.
+   */
+  memoryUsageRatio(): Promise<number | null>
 }

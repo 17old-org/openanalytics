@@ -54,9 +54,38 @@ export type EmailSendOutcome =
       readonly detail: string
     }
 
+/**
+ * Per-send options that are about the *delivery attempt*, not the message.
+ *
+ * Kept off `EmailMessage` on purpose: everything on that type is rendered into
+ * the mail a person receives, and an idempotency key is not — it is a property
+ * of this HTTP call. A template that gained the ability to set it would be a
+ * template that could break deduplication.
+ */
+export interface EmailSendOptions {
+  /**
+   * De-duplicates retries of the same logical send at the provider.
+   *
+   * The caller passes the outbox row's id, which is unique per queued message
+   * and — this is the property that matters — **stable across reclaims**. The
+   * outbox's crash recovery (`reclaimStalledOutbox`) is at-least-once by
+   * construction: it cannot tell a row whose worker died before sending from one
+   * whose worker died after sending but before recording it, so it must assume
+   * the first. This key is what makes the second case cost nothing.
+   *
+   * Honoured by the Resend transport only, and that is full coverage rather than
+   * partial: production runs `transport: "resend"` (asserted at boot by
+   * `email_transport_selected`). SMTP has no equivalent — Resend's own
+   * `Resend-Idempotency-Key` mail header applies to Resend's SMTP endpoint, not
+   * to the arbitrary relay a self-hoster configures — and the log transport
+   * delivers nothing to duplicate.
+   */
+  readonly idempotencyKey?: string
+}
+
 export interface EmailTransport {
   readonly id: string
-  send(message: EmailMessage): Promise<EmailSendOutcome>
+  send(message: EmailMessage, options?: EmailSendOptions): Promise<EmailSendOutcome>
 }
 
 export interface ResendTransportConfig {
@@ -82,7 +111,7 @@ export function createResendTransport(
 ): EmailTransport {
   return {
     id: 'resend',
-    async send(message) {
+    async send(message, options) {
       let response: Response
       try {
         response = await fetchImpl(RESEND_ENDPOINT, {
@@ -90,6 +119,17 @@ export function createResendTransport(
           headers: {
             authorization: `Bearer ${config.apiKey}`,
             'content-type': 'application/json',
+            // An HTTP REQUEST header, and not one of `message.headers` — those
+            // go in the JSON body and become headers of the mail itself. Name
+            // confirmed against the Resend API reference (2026-08-24): POST
+            // /emails and POST /emails/batch accept `Idempotency-Key`, keys are
+            // retained for 24 hours and may be up to 256 characters. Our key is
+            // a 36-character outbox id, and the outbox lease that can produce a
+            // duplicate is five minutes — inside that window by three orders of
+            // magnitude.
+            ...(options?.idempotencyKey === undefined
+              ? {}
+              : { 'idempotency-key': options.idempotencyKey }),
           },
           body: JSON.stringify({
             from: message.from ?? config.defaultFrom,
@@ -107,6 +147,17 @@ export function createResendTransport(
         return { ok: false, reason: 'unauthorized', detail: `resend responded ${response.status}` }
       }
       if (response.status >= 500) {
+        return { ok: false, reason: 'unavailable', detail: `resend responded ${response.status}` }
+      }
+      // The two 4xx codes that mean *later*, not *never*. Without this line they
+      // fall into the `invalid` branch below and a throttled send is treated as
+      // a malformed message: `invalid` is terminal (`processEmailOutbox`), so a
+      // rate limit would discard the mail rather than wait a minute for it —
+      // and `429` is the single most ordinary failure a mail API has. This is
+      // the same split `classifySmtpFailure` already draws for SMTP, where 4xx
+      // is "try again later" and 5xx is "never"; HTTP inverts the numbers, so
+      // the split has to be spelled out rather than inherited from the range.
+      if (response.status === 408 || response.status === 429) {
         return { ok: false, reason: 'unavailable', detail: `resend responded ${response.status}` }
       }
       if (!response.ok) {

@@ -336,7 +336,21 @@ describe('the five ADR-0039 reads', () => {
     share.value = sharedWith('sharePages')
     const res = await buildApp().fetch(new Request(url('pages')))
     const body = (await res.json()) as { items: Record<string, unknown>[] }
-    expect(body.items[0]).toEqual({ page_path: '/pricing', views: 120, visitors: 80 })
+    // The entry/exit columns are `null` rather than absent (ADR-0075, D-E1):
+    // the public share does not ask for the session decoration, so it still
+    // issues ONE gateway query and says "not measured" rather than "zero".
+    // Asserted with `toEqual` rather than `toMatchObject` on purpose — this test
+    // exists to catch a field arriving on the public surface that nobody
+    // decided to put there.
+    expect(body.items[0]).toEqual({
+      page_path: '/pricing',
+      views: 120,
+      visitors: 80,
+      entrances: null,
+      exits: null,
+      bounces: null,
+      bounce_rate: null,
+    })
   })
 
   it('timeseries reports no comparison — the public surface takes no compare', async () => {

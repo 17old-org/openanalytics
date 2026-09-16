@@ -11,8 +11,10 @@ Two ways in:
   services into infrastructure you already run.
 
 Requirements for the compose path: a Linux host with Docker and the Compose
-plugin, four DNS records pointing at it, and about 4 GB of RAM. Everything else
-is built from this repository.
+plugin, four DNS records pointing at it, about 4 GB of RAM and **25 GB of free
+disk**. A release is about 13 GB of images, and an upgrade holds two generations
+at once until the old one is cleared, which is where the second figure comes
+from. Everything else is built from this repository.
 
 ---
 
@@ -75,7 +77,7 @@ part doing the work: a candidate publishes images under its own tag and sorts
 _above_ the release it is a candidate for, so `git tag --sort=-v:refname` lists
 `v0.1.0-rc.1` before `v0.1.0` and `git describe` would hand you the candidate.
 Dropping every tag with a `-` in it leaves only releases. To take a specific
-one, name it instead: `git checkout v0.4.2`.
+one, name it instead: `git checkout v0.6.0`.
 
 Add `--with-geoip` to that last command to download the country and city
 database in the same pass — see [GeoIP](#geoip). It is the one thing in the
@@ -114,7 +116,7 @@ because you checked out the tag before running it:
 > your version over the baked one, which still wins.
 
 ```sh
-grep OA_IMAGE .env                 # ghcr.io/openlabs-so/openanalytics, v0.4.2
+grep OA_IMAGE .env                 # ghcr.io/openlabs-so/openanalytics, v0.6.0
 docker compose pull
 docker compose up -d
 docker compose logs -f migrate     # schemas, both stores, from empty
@@ -291,8 +293,8 @@ Each service validates its own environment at startup, and **a service handed a
 secret it must not hold exits rather than starting**. That is the boundary the
 architecture rests on:
 
-- the internet-facing collector holds no ClickHouse credential, no Stripe key,
-  no mail credential and cannot mint the preview tokens it verifies;
+- the internet-facing collector holds no ClickHouse credential, no Stripe key
+  and no mail credential;
 - the query gateway holds the public verify key and never the private one, so it
   cannot forge the requests it exists to authenticate;
 - only the worker holds the credential that can delete analytics rows;
@@ -335,13 +337,12 @@ that should:
 | `ANONYMOUS_IDENTITY_SECRET` | `env/collector.env`, `env/worker.env` |
 | `OA_CREDENTIAL_KEYRING`     | `env/api.env`, `env/worker.env`       |
 
-### The three key pairs, and why they are not in an env file
+### The two key pairs, and why they are not in an env file
 
 | Pair            | Private half (api mints) | Public half (verifies only) |
 | --------------- | ------------------------ | --------------------------- |
 | Query signing   | api                      | query gateway               |
 | Realtime tokens | api                      | realtime                    |
-| Rule preview    | api                      | collector                   |
 
 ```sh
 openssl genpkey -algorithm ed25519 -out private.pem
@@ -559,23 +560,22 @@ Nothing here refuses to boot. Every one of these degrades a surface and says so
 in the log, which is the deliberate shape: a deployment must not fail over a
 feature it has not enabled.
 
-| Missing                                                                                       | What breaks                                                                                                                                                                                                            |
-| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Missing                                                                  | What breaks                                                                                                                                                                                                            |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Mail transport (stored settings, `SENDFLARE_API_KEY`, `RESEND_API_KEY` or SMTP) on the worker | **Magic-link sign-in cannot complete**; invitations never arrive. Nothing is sent and the link is written nowhere. Sign in with the account the first-run screen made, then configure a relay in Account → Deployment. |
-| `AUTH_TRUSTED_ORIGINS` on the api                                                             | **Every browser call from the dashboard is refused.** No `Access-Control-Allow-Origin` is emitted at all — fail-closed by design.                                                                                      |
-| `APP_BASE_URL` on the api                                                                     | Human-facing links (invitation acceptance, billing returns) point at pages the api does not serve.                                                                                                                     |
-| `GOOGLE_*` / `GITHUB_*`                                                                       | No Google/GitHub button. A provider appears only when both its id and secret are present.                                                                                                                              |
-| `GEOIP_DB_PATH`                                                                               | Every event carries null geo. No country, no city.                                                                                                                                                                     |
-| `CLICKHOUSE_MAINTENANCE_*` on the worker                                                      | **Site and account deletion queue and retry forever** instead of erasing anything. A wait, not a loss — but a silent one.                                                                                              |
-| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`                                                 | Billing surfaces disable themselves. Normally what a self-hosted install wants.                                                                                                                                        |
-| `OPENAI_API_KEY` **and** no stored provider                                                   | The AI assistant answers `503 not configured` — _before_ any question is charged — and the dashboard draws its chat button disabled.                                                                                   |
-| `OA_CREDENTIAL_KEYRING`                                                                       | Revenue-connection routes that encrypt are not mounted (404); reading and disconnecting still work. Account → Deployment closes with `no_keyring`, because it would be storing secrets it cannot protect.              |
-| `CREDENTIAL_SOURCE_SECRET`                                                                    | No credential events are journalled at all. Reads are untouched.                                                                                                                                                       |
-| `OBJECT_STORAGE_*`                                                                            | Data import and export are not mounted.                                                                                                                                                                                |
-| `PREVIEW_TOKEN_*`                                                                             | Rule preview is unavailable; the published rule set is served instead. A preview that cannot be authenticated is served as no preview, never as an unauthenticated one.                                                |
-| `REALTIME_CACHE_REDIS_URL` on the gateway                                                     | Replay defence becomes per-process — correct only with a single gateway instance. It warns.                                                                                                                            |
-| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_NOTIFY_CHAT_ID`                                              | Notifications use the log transport.                                                                                                                                                                                   |
-| `METRICS_REMOTE_WRITE_*`                                                                      | No metrics pipeline; the structured-log metrics floor remains.                                                                                                                                                         |
+| `AUTH_TRUSTED_ORIGINS` on the api                                        | **Every browser call from the dashboard is refused.** No `Access-Control-Allow-Origin` is emitted at all — fail-closed by design.                                                                                      |
+| `APP_BASE_URL` on the api                                                | Human-facing links (invitation acceptance, billing returns) point at pages the api does not serve.                                                                                                                     |
+| `GOOGLE_*` / `GITHUB_*`                                                  | No Google/GitHub button. A provider appears only when both its id and secret are present.                                                                                                                              |
+| `GEOIP_DB_PATH`                                                          | Every event carries null geo. No country, no city.                                                                                                                                                                     |
+| `CLICKHOUSE_MAINTENANCE_*` on the worker                                 | **Site and account deletion queue and retry forever** instead of erasing anything. A wait, not a loss — but a silent one.                                                                                              |
+| `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`                            | Billing surfaces disable themselves. Normally what a self-hosted install wants.                                                                                                                                        |
+| `OPENAI_API_KEY` **and** no stored provider                              | The AI assistant answers `503 not configured` — _before_ any question is charged — and the dashboard draws its chat button disabled.                                                                                   |
+| `OA_CREDENTIAL_KEYRING`                                                  | Revenue-connection routes that encrypt are not mounted (404); reading and disconnecting still work. Account → Deployment closes with `no_keyring`, because it would be storing secrets it cannot protect.              |
+| `CREDENTIAL_SOURCE_SECRET`                                               | No credential events are journalled at all. Reads are untouched.                                                                                                                                                       |
+| `OBJECT_STORAGE_*`                                                       | Data import and export are not mounted.                                                                                                                                                                                |
+| `REALTIME_CACHE_REDIS_URL` on the gateway                                | Replay defence becomes per-process — correct only with a single gateway instance. It warns.                                                                                                                            |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_NOTIFY_CHAT_ID`                         | Notifications use the log transport.                                                                                                                                                                                   |
+| `METRICS_REMOTE_WRITE_*`                                                 | No metrics pipeline; the structured-log metrics floor remains.                                                                                                                                                         |
 
 ---
 
@@ -641,9 +641,19 @@ Two things worth knowing before you rely on any of it:
 
 ```sh
 git fetch --tags
-git checkout v0.4.2            # the release you are moving to
+git checkout v0.6.0            # the release you are moving to
 cd infra/selfhost
 ./upgrade.sh                   # tells you what it costs, then does it
+```
+
+**On a box with less than 25 GB free, clear the previous release first.** The new
+images are pulled before the old ones are released, so the upgrade briefly needs
+room for two generations of about 13 GB each. Without it the pull fails part-way
+through extracting a layer, with `no space left on device` naming a file inside
+`node_modules` and nothing naming the disk:
+
+```sh
+docker image prune -a -f       # keeps whatever the running containers use
 ```
 
 Run it from the **new** checkout: the script that performs an upgrade ships with
@@ -651,6 +661,10 @@ the version being upgraded to. It works out the target from the tag you are
 standing on, takes a snapshot, points `.env` at the new images, pulls them and
 brings everything up. On an architecture with no published images,
 `./upgrade.sh --from-source` builds instead.
+
+**0.5.0 → 0.6.0 asks nothing else of you.** Its two ClickHouse migrations
+only add columns, and the migrate container applies them while the upgrade
+runs.
 
 **There are no down migrations, and that is a decision rather than an omission.**
 A reverse migration is code that runs once, in an emergency, having never been

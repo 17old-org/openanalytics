@@ -281,7 +281,17 @@ describe('freshness interpretation', () => {
     expect(res.meta.freshness.state).toBe('degraded')
     expect(res.meta.partial).toBe(true)
     // The data itself still came back.
-    expect(res.items).toEqual([{ page_path: '/', views: 10, visitors: 8 }])
+    expect(res.items).toEqual([
+      {
+        page_path: '/',
+        views: 10,
+        visitors: 8,
+        entrances: null,
+        exits: null,
+        bounces: null,
+        bounce_rate: null,
+      },
+    ])
   })
 })
 

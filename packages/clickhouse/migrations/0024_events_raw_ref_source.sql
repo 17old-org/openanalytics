@@ -1,0 +1,68 @@
+-- One additive column: `events_raw.ref_source` (ADR-0077, D-R2).
+--
+-- Rollout note: expand-only. A single `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
+-- on an existing table. No backfill, no rewrite of stored rows, and no
+-- `CREATE MATERIALIZED VIEW` anywhere in this file. 0023 part B is the
+-- precedent for both the shape and the reasoning, and its rollout note is the
+-- one to read beside this one.
+--
+-- Remember the directory rule while reading the prose: NO SEMICOLON MAY APPEAR
+-- INSIDE A COMMENT, because the runner splits on the semicolon before it strips
+-- comments.
+--
+-- ============================================================================
+-- WHY THE COLUMN EXISTS
+-- ============================================================================
+--
+-- `?ref=producthunt` is the convention the directory-and-newsletter ecosystem
+-- links with, and until ADR-0077 nothing read it: the value was kept -- `ref` is
+-- in `ATTRIBUTION_QUERY_KEYS`, so the redactor never dropped it -- and then
+-- ignored, so the visit was stored with an empty `referrer_domain` and the
+-- Sources report called it Direct. Measured on production over 30 days, 11,787
+-- events carried a `ref` and 11,035 of them (93.6%) had neither a referrer nor a
+-- `utm_source`. D-R1 reads the tag at INGEST and fills `referrer_domain` from
+-- it, for the reason ADR-0028 gives: that column is the rollup grouping key and
+-- `sources_1h` has already grouped by it before any reader exists to repair it.
+--
+-- This column records that the value was DERIVED rather than reported, and it is
+-- the exact counterpart of `click_id_source` beside it (0023 part B), for the
+-- same three reasons: it is how "how much of our Sources report is inferred
+-- rather than reported" is answerable at all, it is how a bad mapping is FOUND
+-- with one GROUP BY rather than by re-deriving the inference from stored page
+-- URLs, and it is empty for every row whose referrer the browser actually sent,
+-- which keeps the two populations separable forever without a second table.
+--
+-- It holds the normalized `ref` VALUE, where `click_id_source` holds a KEY, and
+-- the asymmetry is not an inconsistency: a click id proves its platform by the
+-- key alone and its value is an individual click that stays `[redacted]`, while
+-- a `ref` tag has one key and carries the whole of its signal in the value. The
+-- value is normalized before it is stored (trimmed, lowercased, capped at 64
+-- characters) and a value that reduces to `[redacted]` derives nothing at all,
+-- so the column cannot become a channel for the text the redactor destroyed.
+--
+-- The two provenance columns are MUTUALLY EXCLUSIVE by construction. Both fill
+-- the same `referrer_domain`, the collector runs the `ref` inference first and
+-- the click-id inference only when the first found nothing, so a row that
+-- carries one carries an empty other. A row with both would be a bug, and it is
+-- one query to look for.
+--
+-- ON THE COLUMN TYPE. `LowCardinality(String)`, matching `click_id_source`,
+-- `referrer_domain` and `utm_source` -- the last of which is customer-authored
+-- and unbounded in exactly the same way, and has been `LowCardinality` since
+-- 0001. The deriver caps a value at 64 characters and refuses anything that is
+-- not a hostname or a slug-shaped label, so a sprayed query parameter cannot
+-- push arbitrary text into the dictionary.
+--
+-- WHAT A PRE-MIGRATION ROW READS BACK AS: the empty string, which is the correct
+-- and honest answer -- nothing was inferred for it, because the inference did
+-- not exist yet. There is no backfill (D-R4), so Direct falls and the named
+-- sources rise from the day of deploy forward, and a range that straddles the
+-- deploy shows the shift as a step rather than as a rewrite.
+--
+-- NO MATERIALIZED-VIEW CHANGE, and none is needed: every rollup that benefits
+-- from D-R1 benefits through `referrer_domain`, which the views already group
+-- by, not through a new key. `sources_1h` and `sources_1d` keep their exact sort
+-- key.
+
+ALTER TABLE events_raw
+  ADD COLUMN IF NOT EXISTS ref_source LowCardinality(String);

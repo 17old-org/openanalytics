@@ -71,10 +71,10 @@ describeIfPostgres('import publish and rollback', () => {
   }
 
   /** A run parked in `ready_for_review`, the state a publish starts from. */
-  const reviewedRun = async (siteId: string): Promise<string> => {
+  const reviewedRun = async (siteId: string, provider = 'plausible'): Promise<string> => {
     const created = await createImportRun(db, {
       siteId,
-      provider: 'plausible',
+      provider,
       declaredBytes: 1_024,
       contentType: 'application/zip',
     })
@@ -258,6 +258,35 @@ describeIfPostgres('import publish and rollback', () => {
       const run = await readImportRun(db, { siteId, importRunId: second })
       expect(run?.supersededRunId).toBe(first)
       expect(run?.cutoverDate).toBe('2024-04-01')
+    })
+
+    it('supersedes across providers, because the generation is the site’s', async () => {
+      // A customer who imported from one tool and then imports from another is
+      // the ordinary second-adapter case, and nothing in the swap looks at
+      // `provider`: the pointer, the supersede and the single rollback
+      // generation are all the *site's*. If any of them were per-provider, a
+      // rollback would restore a run the site is not pointing at.
+      const siteId = await makeSite()
+      const fromPlausible = await reviewedRun(siteId, 'plausible')
+      await publish(siteId, fromPlausible)
+
+      const fromUmami = await reviewedRun(siteId, 'umami')
+      expect(await publish(siteId, fromUmami)).toMatchObject({
+        ok: true,
+        swapped: true,
+        predecessorRunId: fromPlausible,
+      })
+      expect(await pointerOf(siteId)).toBe(fromUmami)
+      expect(await stateOf(fromPlausible)).toBe('superseded')
+
+      // One generation, and it points back across the provider boundary.
+      expect(await rollbackImportRun(db, { siteId, importRunId: fromUmami })).toEqual({
+        ok: true,
+        restoredRunId: fromPlausible,
+      })
+      expect(await pointerOf(siteId)).toBe(fromPlausible)
+      expect(await stateOf(fromPlausible)).toBe('published')
+      expect(await stateOf(fromUmami)).toBe('rolled_back')
     })
 
     it('is idempotent: a second publish of the same run swaps nothing', async () => {

@@ -75,6 +75,8 @@ function factRow(over: Record<string, unknown>): Record<string, unknown> {
     browser: '',
     os: '',
     country: '',
+    city: '',
+    session_hints: [],
     finalized: 0,
     retracted: 0,
     computed_at: '2026-07-01 10:00:00.000',
@@ -171,6 +173,434 @@ describeIfClickHouse('session-read and funnel gateway operations', () => {
       await client.command({ query: `DROP DATABASE IF EXISTS ${database}` })
       await client.close()
     }
+  })
+
+  // -------------------------------------------------------------------------
+  // Entry, exit and bounce (ADR-0075, D-E1)
+  // -------------------------------------------------------------------------
+
+  it('entry/exit: argMax first and retraction after, with a single-page session counted once', async () => {
+    // The retraction trap, on the new operation. Filtering `retracted = 0`
+    // BEFORE the version selection discards the tombstone and resurrects the
+    // stale version underneath it — so this seeds exactly that shape and proves
+    // the read returns nothing for it, while a session whose latest version is
+    // live is counted.
+    const from = '2026-07-05T09:00:00.000Z'
+    const to = '2026-07-05T10:00:00.000Z'
+    const site = randomUUID()
+
+    await insertFacts([
+      // A bounced single-page session: entry and exit are the same path, and it
+      // must contribute one entrance, one exit and ONE session, not two.
+      factRow({
+        site_id: site,
+        session_id: 'ee-single',
+        version: 1,
+        session_start: '2026-07-05 09:05:00.000',
+        entry_page_path: '/lp',
+        exit_page_path: '/lp',
+        engaged: 0,
+      }),
+      // A two-page engaged session: entrance on /lp, exit on /pricing, no bounce.
+      factRow({
+        site_id: site,
+        session_id: 'ee-two',
+        version: 1,
+        session_start: '2026-07-05 09:10:00.000',
+        entry_page_path: '/lp',
+        exit_page_path: '/pricing',
+        engaged: 1,
+      }),
+      // A session that WAS stored and has since been retracted. Its live version
+      // is seeded first so a pre-filtering read would find it and count it.
+      factRow({
+        site_id: site,
+        session_id: 'ee-gone',
+        version: 1,
+        session_start: '2026-07-05 09:20:00.000',
+        entry_page_path: '/lp',
+        exit_page_path: '/lp',
+        engaged: 0,
+      }),
+      // A session with no page view at all — only a custom event. Its empty
+      // entry/exit path is not a page and must not become a row.
+      factRow({
+        site_id: site,
+        session_id: 'ee-nopage',
+        version: 1,
+        session_start: '2026-07-05 09:30:00.000',
+        entry_page_path: '',
+        exit_page_path: '',
+        engaged: 1,
+      }),
+    ])
+    // The tombstone goes in its own INSERT, and that is load-bearing rather than
+    // tidy: ReplacingMergeTree collapses equal sort keys WITHIN one written
+    // block, so seeding both versions together would erase v1 before any read
+    // could be wrong about it — and the pre-filter comparison below would pass
+    // for the wrong reason.
+    await insertFacts([
+      factRow({
+        site_id: site,
+        session_id: 'ee-gone',
+        version: 2,
+        session_start: '2026-07-05 09:20:00.000',
+        entry_page_path: '/lp',
+        exit_page_path: '/lp',
+        engaged: 0,
+        retracted: 1,
+      }),
+    ])
+
+    const rows = await run('analytics.page_sessions_hour', {
+      site_id: site,
+      from,
+      to,
+      limit: 50,
+    })
+    const byPath = new Map(rows.map((row) => [String(row['page_path']), row]))
+
+    expect([...byPath.keys()].sort()).toEqual(['/lp', '/pricing'])
+
+    // /lp: two entrances (single + two-page), one exit (the single-page one),
+    // one bounce. The retracted session contributes nothing — a pre-filtering
+    // read would have said three entrances and two bounces.
+    expect(Number(byPath.get('/lp')?.['entrances'])).toBe(2)
+    expect(Number(byPath.get('/lp')?.['exits'])).toBe(1)
+    expect(Number(byPath.get('/lp')?.['bounces'])).toBe(1)
+    // Two distinct sessions touched /lp as an entry or an exit, and the
+    // single-page session's two arrayJoin rows must not double it.
+    expect(Number(byPath.get('/lp')?.['sessions'])).toBe(2)
+
+    // /pricing is an exit only: a bounce is a property of where a visit BEGAN,
+    // so it is counted on the entry row alone.
+    expect(Number(byPath.get('/pricing')?.['exits'])).toBe(1)
+    expect(Number(byPath.get('/pricing')?.['entrances'])).toBe(0)
+    expect(Number(byPath.get('/pricing')?.['bounces'])).toBe(0)
+
+    // And the trap itself, run side by side, the way `clickhouse-sessions`
+    // proves it for the raw fact read. Filtering `retracted = 0` BEFORE the
+    // version selection discards the tombstone and resurrects the stale v1,
+    // which counts a session that no longer exists. Asserting the wrong read is
+    // wrong is what makes the right read's `2` mean something: on a
+    // ReplacingMergeTree a background merge could have collapsed the two
+    // versions and made a pre-filter accidentally correct, and then this
+    // fixture would no longer be testing anything — so it fails loudly instead.
+    const operation = findOperation('analytics.page_sessions_hour')!
+    const naiveSql = operation.sql.replace(
+      '    WHERE sfv.site_id = {site_id:UUID}',
+      '    WHERE sfv.site_id = {site_id:UUID}\n      AND sfv.retracted = 0',
+    )
+    expect(naiveSql).not.toBe(operation.sql)
+    const naive = await client
+      .query({
+        query: naiveSql,
+        query_params: operation.bindParams({ site_id: site, from, to, limit: 50 }),
+        format: 'JSONEachRow',
+      })
+      .then((set) => set.json<Record<string, unknown>>())
+    const naiveLp = naive.find((row) => String(row['page_path']) === '/lp')
+    expect(Number(naiveLp?.['entrances'])).toBe(3)
+    expect(Number(naiveLp?.['bounces'])).toBe(2)
+  })
+
+  // -------------------------------------------------------------------------
+  // Filtered reads (ADR-0075, D-F1/D-F3)
+  // -------------------------------------------------------------------------
+
+  it('a filtered read selects SESSIONS and then counts everything those sessions did', async () => {
+    // D-F1, proven with data rather than asserted in prose. A visitor arrives
+    // from youtube.com and reads three pages; only the landing page view carries
+    // the referrer. A pageview-grain filter would report one page under
+    // `Source: youtube.com`; the session-grain filter must report three.
+    const site = randomUUID()
+    const from = '2026-07-06T09:00:00.000Z'
+    const to = '2026-07-06T10:00:00.000Z'
+
+    await insertFacts([
+      factRow({
+        site_id: site,
+        session_id: 'f-yt',
+        version: 1,
+        session_start: '2026-07-06 09:01:00.000',
+        session_hint: 'hint-yt',
+        session_hints: ['hint-yt'],
+        anonymous_id: 'anon-yt',
+        referrer_domain: 'youtube.com',
+        country: 'US',
+        city: 'Austin',
+        device_type: 'desktop',
+      }),
+      factRow({
+        site_id: site,
+        session_id: 'f-direct',
+        version: 1,
+        session_start: '2026-07-06 09:02:00.000',
+        session_hint: 'hint-direct',
+        session_hints: ['hint-direct'],
+        anonymous_id: 'anon-direct',
+        referrer_domain: '',
+        country: 'US',
+        city: 'Austin',
+        device_type: 'desktop',
+      }),
+      // A retracted session that WOULD match the filter. It must not admit its
+      // events, and the tombstone only works if the version selection runs first.
+      factRow({
+        site_id: site,
+        session_id: 'f-gone',
+        version: 1,
+        session_start: '2026-07-06 09:03:00.000',
+        session_hint: 'hint-gone',
+        session_hints: ['hint-gone'],
+        referrer_domain: 'youtube.com',
+      }),
+      // One session, two tabs: the sessionizer partitions by identity rather
+      // than by hint, so this session owns two hints and `session_hint` stores
+      // only the first. Joining on the entry hint alone would lose every event
+      // of the second tab — measured at roughly one page view in six on
+      // production, which is what `session_hints` exists to fix.
+      factRow({
+        site_id: site,
+        session_id: 'f-twotabs',
+        version: 1,
+        session_start: '2026-07-06 09:04:00.000',
+        session_hint: 'hint-tab1',
+        session_hints: ['hint-tab1', 'hint-tab2'],
+        anonymous_id: 'anon-tabs',
+        referrer_domain: 'youtube.com',
+        country: 'DE',
+        city: 'Berlin',
+        device_type: 'mobile',
+      }),
+    ])
+    // Its own INSERT, for the reason the entry/exit case states: a Replacing
+    // engine collapses equal sort keys within one written block, so a tombstone
+    // seeded beside its own predecessor proves nothing about the read order.
+    await insertFacts([
+      factRow({
+        site_id: site,
+        session_id: 'f-gone',
+        version: 2,
+        session_start: '2026-07-06 09:03:00.000',
+        session_hint: 'hint-gone',
+        session_hints: ['hint-gone'],
+        referrer_domain: 'youtube.com',
+        retracted: 1,
+      }),
+    ])
+
+    await insertRawEvents([
+      // The YouTube session's three page views. Only the first carries the
+      // referrer, which is the whole reason a pageview-grain filter is wrong.
+      {
+        site_id: site,
+        event_id: randomUUID(),
+        type: 'page_view',
+        origin: 'live',
+        occurred_at: '2026-07-06 09:01:00.000',
+        received_at: '2026-07-06 09:01:00.000',
+        accepted_at: '2026-07-06 09:01:00.000',
+        clock_skewed: 0,
+        ingest_generation: 1,
+        billing_user_id: randomUUID(),
+        billing_assignment_version: 1,
+        usage_window_start: '2026-07-06 00:00:00.000',
+        billing_grace: 0,
+        session_id: 'hint-yt',
+        anonymous_id: 'anon-yt',
+        page_path: '/lp',
+        referrer_domain: 'youtube.com',
+      },
+      {
+        site_id: site,
+        event_id: randomUUID(),
+        type: 'page_view',
+        origin: 'live',
+        occurred_at: '2026-07-06 09:01:30.000',
+        received_at: '2026-07-06 09:01:30.000',
+        accepted_at: '2026-07-06 09:01:30.000',
+        clock_skewed: 0,
+        ingest_generation: 1,
+        billing_user_id: randomUUID(),
+        billing_assignment_version: 1,
+        usage_window_start: '2026-07-06 00:00:00.000',
+        billing_grace: 0,
+        session_id: 'hint-yt',
+        anonymous_id: 'anon-yt',
+        page_path: '/pricing',
+      },
+      {
+        site_id: site,
+        event_id: randomUUID(),
+        type: 'page_view',
+        origin: 'live',
+        occurred_at: '2026-07-06 09:02:00.000',
+        received_at: '2026-07-06 09:02:00.000',
+        accepted_at: '2026-07-06 09:02:00.000',
+        clock_skewed: 0,
+        ingest_generation: 1,
+        billing_user_id: randomUUID(),
+        billing_assignment_version: 1,
+        usage_window_start: '2026-07-06 00:00:00.000',
+        billing_grace: 0,
+        session_id: 'hint-yt',
+        anonymous_id: 'anon-yt',
+        page_path: '/docs',
+      },
+      // A Direct session's page view: must not appear under a youtube filter.
+      {
+        site_id: site,
+        event_id: randomUUID(),
+        type: 'page_view',
+        origin: 'live',
+        occurred_at: '2026-07-06 09:02:10.000',
+        received_at: '2026-07-06 09:02:10.000',
+        accepted_at: '2026-07-06 09:02:10.000',
+        clock_skewed: 0,
+        ingest_generation: 1,
+        billing_user_id: randomUUID(),
+        billing_assignment_version: 1,
+        usage_window_start: '2026-07-06 00:00:00.000',
+        billing_grace: 0,
+        session_id: 'hint-direct',
+        anonymous_id: 'anon-direct',
+        page_path: '/lp',
+      },
+      // The retracted session's page view: must not appear either.
+      {
+        site_id: site,
+        event_id: randomUUID(),
+        type: 'page_view',
+        origin: 'live',
+        occurred_at: '2026-07-06 09:03:10.000',
+        received_at: '2026-07-06 09:03:10.000',
+        accepted_at: '2026-07-06 09:03:10.000',
+        clock_skewed: 0,
+        ingest_generation: 1,
+        billing_user_id: randomUUID(),
+        billing_assignment_version: 1,
+        usage_window_start: '2026-07-06 00:00:00.000',
+        billing_grace: 0,
+        session_id: 'hint-gone',
+        anonymous_id: 'anon-gone',
+        page_path: '/ghost',
+      },
+      // The two-tab session: one page view under each hint. Both belong to one
+      // session and both must be counted.
+      {
+        site_id: site,
+        event_id: randomUUID(),
+        type: 'page_view',
+        origin: 'live',
+        occurred_at: '2026-07-06 09:04:00.000',
+        received_at: '2026-07-06 09:04:00.000',
+        accepted_at: '2026-07-06 09:04:00.000',
+        clock_skewed: 0,
+        ingest_generation: 1,
+        billing_user_id: randomUUID(),
+        billing_assignment_version: 1,
+        usage_window_start: '2026-07-06 00:00:00.000',
+        billing_grace: 0,
+        session_id: 'hint-tab1',
+        anonymous_id: 'anon-tabs',
+        page_path: '/tabs',
+        country: 'DE',
+        city: 'Berlin',
+      },
+      {
+        site_id: site,
+        event_id: randomUUID(),
+        type: 'page_view',
+        origin: 'live',
+        occurred_at: '2026-07-06 09:04:30.000',
+        received_at: '2026-07-06 09:04:30.000',
+        accepted_at: '2026-07-06 09:04:30.000',
+        clock_skewed: 0,
+        ingest_generation: 1,
+        billing_user_id: randomUUID(),
+        billing_assignment_version: 1,
+        usage_window_start: '2026-07-06 00:00:00.000',
+        billing_grace: 0,
+        session_id: 'hint-tab2',
+        anonymous_id: 'anon-tabs',
+        page_path: '/tabs',
+        country: 'DE',
+        city: 'Berlin',
+      },
+      // An event with no hint at all — a server-side or widget write. It belongs
+      // to no session, so no session attribute can select it. That is the rule
+      // rather than an omission, and it is measured at 0.001% of production.
+      {
+        site_id: site,
+        event_id: randomUUID(),
+        type: 'page_view',
+        origin: 'server',
+        occurred_at: '2026-07-06 09:05:00.000',
+        received_at: '2026-07-06 09:05:00.000',
+        accepted_at: '2026-07-06 09:05:00.000',
+        clock_skewed: 0,
+        ingest_generation: 1,
+        billing_user_id: randomUUID(),
+        billing_assignment_version: 1,
+        usage_window_start: '2026-07-06 00:00:00.000',
+        billing_grace: 0,
+        session_id: '',
+        anonymous_id: 'anon-server',
+        page_path: '/api-hit',
+      },
+    ])
+
+    const filtered = await run('analytics.filtered_pages_hour', {
+      site_id: site,
+      from,
+      to,
+      limit: 50,
+      filters: [{ dimension: 'referrer_domain', operator: 'eq', values: ['youtube.com'] }],
+    })
+    const paths = new Map(filtered.map((row) => [String(row['page_path']), Number(row['views'])]))
+
+    // Three pages for a visit that carried its referrer on one of them. This is
+    // D-F1: five pages under `Source: youtube.com`, not one.
+    expect(paths.get('/lp')).toBe(1)
+    expect(paths.get('/pricing')).toBe(1)
+    expect(paths.get('/docs')).toBe(1)
+    // Both tabs of the one YouTube session, found through `session_hints`.
+    expect(paths.get('/tabs')).toBe(2)
+    // The Direct session, the retracted session and the hintless event are all
+    // absent — three different reasons, one correct answer.
+    expect(paths.has('/ghost')).toBe(false)
+    expect(paths.has('/api-hit')).toBe(false)
+    expect(paths.get('/lp')).not.toBe(2)
+
+    // And a second dimension ANDs rather than ORs.
+    const both = await run('analytics.filtered_pages_hour', {
+      site_id: site,
+      from,
+      to,
+      limit: 50,
+      filters: [
+        { dimension: 'referrer_domain', operator: 'eq', values: ['youtube.com'] },
+        { dimension: 'device_type', operator: 'eq', values: ['mobile'] },
+      ],
+    })
+    expect(both.map((row) => String(row['page_path']))).toEqual(['/tabs'])
+
+    // A city filter reaches the column migration 0023 added, which is the whole
+    // reason lane 0 had to land before this one.
+    const city = await run('analytics.filtered_geography_hour', {
+      site_id: site,
+      from,
+      to,
+      limit: 50,
+      filters: [{ dimension: 'city', operator: 'eq', values: ['Berlin'] }],
+    })
+    // The filter reads the SESSION's entry city (migration 0023's column, which
+    // is why lane 0 had to land before this one); the row's own dimensions still
+    // come from the events, as they do on the unfiltered report.
+    expect(city).toHaveLength(1)
+    expect(String(city[0]?.['city'])).toBe('Berlin')
+    expect(Number(city[0]?.['views'])).toBe(2)
   })
 
   it('provisional layer: argMax over version flips a bounce, retraction drops a session, sums are additive', async () => {

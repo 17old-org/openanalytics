@@ -69,10 +69,10 @@ describeIfPostgres('import runs', () => {
     return siteId
   }
 
-  const startRun = async (siteId: string, bytes = 1_024) =>
+  const startRun = async (siteId: string, bytes = 1_024, provider = 'plausible') =>
     await createImportRun(db, {
       siteId,
-      provider: 'plausible',
+      provider,
       declaredBytes: bytes,
       contentType: 'application/zip',
     })
@@ -238,19 +238,28 @@ describeIfPostgres('import runs', () => {
       expect(created.upload.etag).toBeNull()
     })
 
-    it('refuses a second live run and names the one in the way', async () => {
-      const siteId = await makeSite()
-      const first = await startRun(siteId)
-      expect(first.ok).toBe(true)
+    it.each(['plausible', 'umami'])(
+      'refuses a second live run and names the one in the way (%s first)',
+      async (provider) => {
+        // **The predicate is on the site, not the provider.** `import_runs.provider`
+        // is free text and the unique index says nothing about it, so a customer
+        // migrating from one tool cannot start a second import from another while
+        // the first is still live. Parameterised the day a second adapter shipped,
+        // because "one live run per site" is the kind of rule a reader assumes is
+        // per-provider once there is more than one.
+        const siteId = await makeSite()
+        const first = await startRun(siteId, 1_024, provider)
+        expect(first.ok).toBe(true)
 
-      const second = await startRun(siteId)
-      expect(second.ok).toBe(false)
-      if (second.ok || second.conflict !== 'live_run')
-        throw new Error('expected a live-run refusal')
-      // The blocking run is named because the recovery is to publish or discard
-      // *that one*; a bare conflict would leave the customer with nothing to do.
-      expect(second.runId).toBe(first.ok ? first.run.id : null)
-    })
+        const second = await startRun(siteId, 1_024, provider === 'umami' ? 'plausible' : 'umami')
+        expect(second.ok).toBe(false)
+        if (second.ok || second.conflict !== 'live_run')
+          throw new Error('expected a live-run refusal')
+        // The blocking run is named because the recovery is to publish or discard
+        // *that one*; a bare conflict would leave the customer with nothing to do.
+        expect(second.runId).toBe(first.ok ? first.run.id : null)
+      },
+    )
 
     it('refuses a second run while the first only awaits review', async () => {
       const siteId = await makeSite()
@@ -481,7 +490,7 @@ describeIfPostgres('import runs', () => {
   })
 
   describe('the deletion snapshot (ADR-0032, D9)', () => {
-    it('writes 63 targets with an empty key list for a site that never imported', async () => {
+    it('writes 62 targets with an empty key list for a site that never imported', async () => {
       const siteId = await makeSite()
       const started = await startSiteDeletion(db, { siteId, requestedByUserId: ownerId })
       const targets = await listDeletionTargets(db, {
@@ -492,10 +501,10 @@ describeIfPostgres('import runs', () => {
       // and its CP3 amendment). The object target deliberately did not multiply
       // and revenue adds none — provider bodies are never persisted.
       // 63, not 64: `billing_transfer_offers` is a target the hosted surface registers (`CLOUD_DELETION_EXTENSION`), so this is the set a build without it erases.
-      expect(targets).toHaveLength(63)
+      expect(targets).toHaveLength(62)
       expect(targets).toHaveLength(SITE_DELETION_TARGETS.length)
       const byStore = (store: string) => targets.filter((t) => t.store === store).length
-      expect(byStore('clickhouse')).toBe(35)
+      expect(byStore('clickhouse')).toBe(34)
       expect(byStore('redis')).toBe(5)
       expect(byStore('postgres')).toBe(22)
       expect(byStore('object')).toBe(1)

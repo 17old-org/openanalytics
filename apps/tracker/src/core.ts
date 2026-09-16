@@ -63,6 +63,13 @@ export interface TrackerRuntimeConfig {
    * have a browser sending the hint that would make it work.
    */
   readonly attributedRevenue: boolean
+  /**
+   * The site no longer exists for this key — deleted, or blocked by expiring
+   * the key — and every event would be refused at the door (ADR-0074). Set from
+   * a config-endpoint 404, never by the site's own configuration; `emit` is the
+   * single gate that honours it, so no signal path can quietly bypass it.
+   */
+  readonly disabled: boolean
   readonly features: {
     readonly web_vitals: boolean
     readonly engagement: boolean
@@ -85,6 +92,7 @@ export const DEFAULT_RUNTIME_CONFIG: TrackerRuntimeConfig = {
   interactionSampling: 1,
   heartbeatIntervalSeconds: HEARTBEAT_INTERVAL_SECONDS,
   noCodeRules: [],
+  disabled: false,
   features: { web_vitals: true, engagement: true, interactions: true, heartbeat: true },
   // Off until the site's configuration says otherwise, which matters most on the
   // first page load — configuration arrives after the first pageview, so the
@@ -97,7 +105,6 @@ export interface TrackerOptions {
   readonly collectorUrl: string
   /** Defaults to the ambient window; injected in tests. */
   readonly window?: Window & typeof globalThis
-  readonly testMode?: boolean
   readonly debug?: boolean
   /**
    * `'none'` runs the tracker memory-only (ADR-0064, D5): nothing is written to
@@ -194,7 +201,6 @@ export function createTracker(options: TrackerOptions): Tracker {
   const context: TrackerContext = {
     sdk: TRACKER_SDK,
     sdk_version: TRACKER_VERSION,
-    ...(options.testMode === true ? { test_mode: true } : {}),
   }
 
   const transport = createTransport({
@@ -230,6 +236,10 @@ export function createTracker(options: TrackerOptions): Tracker {
     options_: { immediate?: boolean } = {},
   ): void => {
     if (!privacy.mayCollect()) return
+    // A gone site sends nothing at all — not to the network and not to the
+    // retry queue, where a refused event would only wait to be refused again.
+    // Guarded here for the same reason `mayCollect` is: one funnel, no bypass.
+    if (config.disabled) return
 
     // The site's attributed-revenue switch (ADR-0064 D4a), applied here rather
     // than at each caller for the same reason `mayCollect` is: one place to
@@ -510,6 +520,13 @@ export function createTracker(options: TrackerOptions): Tracker {
         heartbeat.restart()
       }
       if (!config.features.heartbeat) heartbeat.stop()
+      // The heartbeat is the one signal that fires on a timer with no visitor
+      // action behind it; a disabled tracker stopping it is what turns "drops
+      // every event" into "does no periodic work either". The other signals go
+      // quiet through the `emit` gate. Not a full `stop()`: that tears down
+      // listeners this page could never re-arm, and the next page load skips
+      // installation entirely while the marker holds.
+      if (config.disabled) heartbeat.stop()
     },
 
     flush() {

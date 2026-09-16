@@ -1,5 +1,5 @@
-import { sessionize } from '@openanalytics/domain'
-import type { SessionRollupUnit } from '@openanalytics/clickhouse'
+import { eventOccurredMs, sessionize, type SessionizerEvent } from '@openanalytics/domain'
+import type { SessionRollupUnit, WindowEventsPage } from '@openanalytics/clickhouse'
 import { WORKER_METRICS } from '../ingest/metrics.ts'
 import type { FinalizerDeps } from './deps.ts'
 import { planRollupSwap, planSessionFacts } from './plan.ts'
@@ -31,6 +31,30 @@ import { planRollupSwap, planSessionFacts } from './plan.ts'
 
 const MS_PER_HOUR = 3_600_000
 const MS_PER_DAY = 86_400_000
+
+/**
+ * The most raw events one recompute window may read.
+ *
+ * There was no cap at all until 2026-08-24, and `readWindowEvents` read
+ * `[watermark, infinity)`. That is fine while the watermark keeps moving and
+ * vicious the moment it stops: a site sending a million events accumulates them
+ * all into one window, the window is read into memory, the process dies, the
+ * watermark therefore never advances, and the next run reads the same window
+ * plus whatever arrived meanwhile. The worker spent ten hours in that loop on
+ * 2026-08-22 — 111 restarts — against a site with 961,858 rows in its window.
+ *
+ * A ROW cap and not a TIME cap, which is the part worth stating plainly: a time
+ * cap bounds how much clock the window covers, not how much memory it costs. A
+ * customer sending a million events an hour blows through an hour-wide window
+ * exactly as they blew through an unbounded one. Rows are the thing that is
+ * actually allocated, so rows are the thing to bound.
+ *
+ * 200,000: 962k rows exhausted a 768 MB heap, so a fifth of that is roughly a
+ * 300 MB peak with the limit left where it is. The number is derived from one
+ * measurement, and `docker stats oa-worker` after deployment is what should
+ * move it — not a second estimate.
+ */
+const MAX_WINDOW_ROWS = 200_000
 
 export interface FinalizeSiteResult {
   readonly siteId: string
@@ -104,15 +128,52 @@ export async function finalizeSite(
 
   try {
     // 2. Recompute the window from the raw events, and read what is stored for it.
-    const events = await deps.store.readWindowEvents({ siteId, fromMs })
+    //
+    // The window is `[fromMs, windowToMs)`, and `windowToMs` is `nowMs` only
+    // when everything up to now fitted under `MAX_WINDOW_ROWS`. When it did
+    // not, the bound is pulled back to where the read actually stopped, and
+    // this run finalizes a prefix of the backlog instead of choking on all of
+    // it. Successive runs walk forward through the rest.
+    const page = await deps.store.readWindowEvents({
+      siteId,
+      fromMs,
+      toMs: nowMs,
+      limit: MAX_WINDOW_ROWS,
+    })
+    const { windowToMs, events } = await resolveWindow(deps, siteId, fromMs, nowMs, page)
+
     const recomputed = sessionize(siteId, events, deps.sessionConfig)
-    const stored = await deps.store.readStoredFacts({ siteId, fromMs })
+    // The SAME bound. A stored fact starting after `windowToMs` is one this run
+    // did not read the events for, and step 3 tombstones every stored session
+    // it cannot find among the recomputed ones — so reading a wider set of
+    // stored facts than events would retract the entire unread tail.
+    const stored = await deps.store.readStoredFacts({ siteId, fromMs, toMs: windowToMs })
 
     const plan = planSessionFacts({
       siteId,
       recomputed,
       stored,
       nowMs,
+      // The line the whole change turns on.
+      //
+      // `planSessionFacts` derives its finalization horizon from how much of the
+      // past it may treat as settled, and left to itself it assumes that is
+      // "everything up to `nowMs`". After a truncated read that assumption is
+      // false: it would judge sessions whose events were never loaded, find them
+      // missing from `recomputed`, and advance the watermark past rows nothing
+      // ever sessionized. Telling it where the read actually stopped is what
+      // keeps both from happening — the watermark it returns can never exceed
+      // `windowToMs - inactivity`, so this run can never claim to have finalized
+      // anything it did not look at.
+      //
+      // Passed alongside the real `nowMs` rather than instead of it, which
+      // matters twice. Fact versions are stamped `computed_at: nowMs` and have
+      // to stay monotonic against wall time. And the lateness allowance is a
+      // statement about `nowMs` — how much of the RECENT past may still be
+      // arriving — which is a different question from how far this read got, and
+      // charging a seven-hour window for a twenty-four-hour allowance would put
+      // the horizon behind the watermark and stall the site permanently.
+      readThroughMs: windowToMs,
       inactivityMs,
       latenessMs: deps.latenessMs,
       sessionMaxLengthMs,
@@ -201,4 +262,68 @@ export async function finalizeSite(
     })
     throw err
   }
+}
+
+/**
+ * Decide the window's upper bound from what the capped read actually returned.
+ *
+ * Uncut page: the bound is `nowMs`, and this is the ordinary path — the cap is
+ * inert on every site that is keeping up.
+ *
+ * Cut page: the last millisecond read is presumed INCOMPLETE, because the cap
+ * can fall anywhere inside it and rows sharing a millisecond are ordered by
+ * `event_id`, which means nothing. So the bound becomes that millisecond
+ * (exclusive) and the events inside it are dropped along with it. They are not
+ * lost; the next run starts there.
+ */
+async function resolveWindow(
+  deps: FinalizerDeps,
+  siteId: string,
+  fromMs: number,
+  nowMs: number,
+  page: WindowEventsPage,
+): Promise<{ windowToMs: number; events: SessionizerEvent[] }> {
+  if (!page.truncated || page.lastOccurredMs === null) {
+    return { windowToMs: nowMs, events: page.events }
+  }
+
+  const boundaryMs = page.lastOccurredMs
+
+  // The degenerate case, and the one that would otherwise wedge the finalizer
+  // permanently: every row under the cap shares a single millisecond, so
+  // trimming to it gives `toMs <= fromMs` — a zero-width window, no watermark
+  // movement, and the same read forever. No bound both respects the cap and
+  // makes progress here, so progress wins: that millisecond is read whole, over
+  // the cap, and the window advances by 1 ms.
+  //
+  // Deliberately unbounded, because bounding it is what creates the deadlock. A
+  // single millisecond holding more than 200,000 events for one site is 200
+  // million events per second from one customer; if that is ever real, the
+  // collector's limiter is what failed, not this.
+  if (boundaryMs <= fromMs) {
+    const whole = await deps.store.readWindowEvents({ siteId, fromMs, toMs: fromMs + 1 })
+    deps.logger.warn('session_window_millisecond_over_cap', {
+      site_id: siteId,
+      from_ms: fromMs,
+      rows: whole.events.length,
+    })
+    return { windowToMs: fromMs + 1, events: whole.events }
+  }
+
+  // `<`, matching the exclusive upper bound the query itself uses, so the events
+  // handed to the sessionizer are exactly those of `[fromMs, boundaryMs)` — no
+  // wider than the window this run claims to have finalized.
+  const events = page.events.filter((event) => eventOccurredMs(event.occurredAt) < boundaryMs)
+  deps.logger.info('session_window_truncated', {
+    site_id: siteId,
+    from_ms: fromMs,
+    to_ms: boundaryMs,
+    now_ms: nowMs,
+    events: events.length,
+    // How far behind the site still is after this run. A figure that stays flat
+    // across runs means the cap is below the site's arrival rate and the
+    // finalizer can never catch up — the one thing here worth watching.
+    lag_ms: nowMs - boundaryMs,
+  })
+  return { windowToMs: boundaryMs, events }
 }

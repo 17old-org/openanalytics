@@ -388,6 +388,66 @@ describeIfPostgres('revenue ingest', () => {
       expect(await countIn('revenue_objects', b)).toBe(1)
     })
 
+    it('keeps one head per PROVIDER for a colliding object id', async () => {
+      // Only worth asserting now that a second provider is live. The unique is
+      // `(site_id, provider, object_id)`, and Polar's ids are UUIDs while
+      // Stripe's are `ch_…` — but nothing in the schema makes them disjoint, and
+      // a site can connect both at once. If `provider` were ever dropped from
+      // that key, one provider's object would silently overwrite the other's.
+      const siteId = await makeSite()
+      await connect(siteId, 'stripe')
+      await connect(siteId, 'polar')
+
+      const stripeHead = await applyRevenueObservation(db, {
+        siteId,
+        provider: 'stripe',
+        observation: observation('obj_collide', '2026-07-31T10:00:00.000Z'),
+        payloadHash: 'h',
+      })
+      const polarHead = await applyRevenueObservation(db, {
+        siteId,
+        provider: 'polar',
+        observation: observation('obj_collide', '2026-07-31T10:00:00.000Z'),
+        payloadHash: 'h',
+      })
+
+      // Two rows, two first versions — not one row applied then skipped as a
+      // duplicate snapshot.
+      expect(stripeHead.decision.action).toBe('apply')
+      expect(polarHead.decision.action).toBe('apply')
+      expect(stripeHead.objectRowId).not.toBe(polarHead.objectRowId)
+      expect(await countIn('revenue_objects', siteId)).toBe(2)
+    })
+
+    it('ledgers the same provider event id once per PROVIDER', async () => {
+      // The ledger's uniqueness has the same shape, and Polar's event id is a
+      // `webhook-id` header value rather than an `evt_…` — two providers could
+      // hand us the same string.
+      const siteId = await makeSite()
+      const stripe = await connect(siteId, 'stripe')
+      const polar = await connect(siteId, 'polar')
+
+      const first = await recordRevenueProviderEvent(db, {
+        siteId,
+        credentialId: stripe.id,
+        provider: 'stripe',
+        providerEventId: 'shared_id',
+        payloadHash: 'h',
+        source: 'webhook',
+      })
+      const second = await recordRevenueProviderEvent(db, {
+        siteId,
+        credentialId: polar.id,
+        provider: 'polar',
+        providerEventId: 'shared_id',
+        payloadHash: 'h',
+        source: 'webhook',
+      })
+      expect(first.firstSeen).toBe(true)
+      expect(second.firstSeen).toBe(true)
+      expect(first.id).not.toBe(second.id)
+    })
+
     it('serializes two concurrent applies into two ordered versions', async () => {
       // The assertion a pure test cannot make. Both transactions open before
       // either commits; the `FOR UPDATE` on the head is what turns them into a
@@ -899,14 +959,14 @@ describeIfPostgres('revenue ingest', () => {
   })
 
   describe('site deletion (ADR-0033, D8)', () => {
-    it('snapshots 63 targets including the three ingest tables', async () => {
+    it('snapshots 62 targets including the three ingest tables', async () => {
       const siteId = await makeSite()
       const started = await startSiteDeletion(db, { siteId, requestedByUserId: ownerId })
       const targets = await listDeletionTargets(db, {
         deletionRequestId: started.deletionRequestId,
       })
       // 63, not 64: `billing_transfer_offers` is a target the hosted surface registers (`CLOUD_DELETION_EXTENSION`), so this is the set a build without it erases.
-      expect(targets).toHaveLength(63)
+      expect(targets).toHaveLength(62)
       expect(targets).toHaveLength(SITE_DELETION_TARGETS.length)
       const names = targets.filter((t) => t.store === 'postgres').map((t) => t.target)
       expect(names).toContain('revenue_provider_events')

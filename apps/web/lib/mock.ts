@@ -41,11 +41,11 @@ export const MOCK_SITES: SiteSummary[] = [
   {
     site_id: "019f8740-2b3c-7a10-9c1d-4e5f6a7b8c9d",
     slug: "openanalytics",
-    name: "openanalytics.io",
+    name: "getopen.so",
     status: "active",
     role: "owner",
     is_billing_owner: true,
-    domains: ["openanalytics.io"],
+    domains: ["getopen.so"],
     created_at: "2025-11-04T09:12:00.000Z",
     // Data has flowed: onboarding's "tracker installed" step is done.
     first_event_at: "2025-11-04T09:41:07.000Z",
@@ -243,11 +243,11 @@ const MOCK_ANALYTICS_META: AnalyticsMeta = {
 export const MOCK_PAGES: AnalyticsPagesResponse = {
   meta: MOCK_ANALYTICS_META,
   items: [
-    { page_path: "/", views: 7412, visitors: 3218 },
-    { page_path: "/pricing", views: 4102, visitors: 1874 },
-    { page_path: "/blog/why-we-left-ga", views: 2988, visitors: 1402 },
-    { page_path: "/docs", views: 2140, visitors: 986 },
-    { page_path: "/changelog", views: 1201, visitors: 512 },
+    { page_path: "/", views: 7412, visitors: 3218, entrances: 2894, exits: 1560, bounces: 1103, bounce_rate: 1103 / 2894 },
+    { page_path: "/pricing", views: 4102, visitors: 1874, entrances: 655, exits: 890, bounces: 214, bounce_rate: 214 / 655 },
+    { page_path: "/blog/why-we-left-ga", views: 2988, visitors: 1402, entrances: 1188, exits: 742, bounces: 561, bounce_rate: 561 / 1188 },
+    { page_path: "/docs", views: 2140, visitors: 986, entrances: 301, exits: 498, bounces: 74, bounce_rate: 74 / 301 },
+    { page_path: "/changelog", views: 1201, visitors: 512, entrances: 0, exits: 240, bounces: 0, bounce_rate: null },
   ],
 };
 

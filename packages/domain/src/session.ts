@@ -279,6 +279,13 @@ export interface SessionizerEvent {
   readonly browser?: string | null
   readonly os?: string | null
   readonly country?: string | null
+  /**
+   * ADR-0075, lane 0 (ClickHouse migration 0023). `events_raw` has carried it
+   * since 0001 and the session fact did not, which made `city` the one filter
+   * dimension the fact table could not answer. Absent is the empty string, like
+   * every other dimension here.
+   */
+  readonly city?: string | null
   /** Active-time beacon payload; present only on `engagement` events. */
   readonly engagement?: { readonly activeMs: number; readonly visibleMs: number } | null
 }
@@ -295,6 +302,22 @@ export interface CanonicalSession {
   /** The entry event's anonymous id (a bridged session keeps its first one). */
   readonly anonymousId: string
   readonly sessionHint: string
+  /**
+   * EVERY client hint this session carried, sorted and deduplicated
+   * (ADR-0075 / ClickHouse migration 0023).
+   *
+   * `sessionHint` above is the entry event's alone, and a session is partitioned
+   * by resolved identity rather than by hint — two tabs of one anonymous visitor
+   * are one session, on purpose — so one session routinely owns several hints.
+   * A read that has to get from a session back to its raw events needs all of
+   * them: measured on production, the entry hint alone finds 82% of a range's
+   * page views while 99% of them have a session under the same anonymous id.
+   *
+   * Sorted so a recompute of the same events produces a byte-identical value and
+   * the finalizer's change detection does not re-version a session over set
+   * iteration order.
+   */
+  readonly sessionHints: readonly string[]
   /** True when the D-102 midnight bridge joined two rotating anonymous streams. */
   readonly midnightBridged: boolean
   /**
@@ -326,6 +349,8 @@ export interface CanonicalSession {
   readonly browser: string
   readonly os: string
   readonly country: string
+  /** ADR-0075 / migration 0023. The entry event's value, empty when absent. */
+  readonly city: string
   /** The activity event ids in this session, ordered — for traceability/audit. */
   readonly eventIds: readonly string[]
 }
@@ -350,7 +375,20 @@ interface NormalizedEvent {
   readonly browser: string
   readonly os: string
   readonly country: string
+  readonly city: string
   readonly activeMs: number | null
+}
+
+/**
+ * `SessionizerEvent.occurredAt` as epoch milliseconds.
+ *
+ * Exported because the session finalizer has to compare that field against a
+ * window bound, and a second local interpretation of a three-way union is how
+ * two readers of one field quietly stop agreeing. There is one rule for what
+ * `occurredAt` means, and it is this function.
+ */
+export function eventOccurredMs(value: string | number | Date): number {
+  return toMs(value)
 }
 
 function toMs(value: string | number | Date): number {
@@ -487,6 +525,7 @@ function normalize(event: SessionizerEvent): NormalizedEvent | null {
     browser: str(event.browser),
     os: str(event.os),
     country: str(event.country),
+    city: str(event.city),
     activeMs,
   }
 }
@@ -551,6 +590,7 @@ function finalizeSession(
     userId: sessionUserId,
     anonymousId: entry.anonymousId,
     sessionHint: entry.sessionHint,
+    sessionHints: [...session.hints].sort(),
     midnightBridged: session.midnightBridged,
     identityStitched: session.identityStitched,
     startMs,
@@ -574,6 +614,7 @@ function finalizeSession(
     browser: entry.browser,
     os: entry.os,
     country: entry.country,
+    city: entry.city,
     eventIds: events.map((event) => event.eventId),
   }
 }

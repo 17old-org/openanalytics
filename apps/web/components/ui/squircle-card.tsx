@@ -13,6 +13,14 @@ import { cn } from "@/lib/utils";
  * Apple-style squircle silhouette, ported from the atlas project. The shape
  * comes from a CSS `shape()` clip-path (with `corner-shape: squircle` where
  * supported) — continuous-curvature corners instead of circular arcs.
+ *
+ * Chromium-only, by declaration: engines without `corner-shape` (Safari,
+ * Firefox) are switched to a plain circular radius by an `@supports not`
+ * block in `globals.css`, which also removes this clip-path. Without that
+ * switch the oversized border-radius here renders as a raw 26/50px blob and
+ * fights the clip's tighter geometry, which is exactly the double-contour
+ * Safari bug it exists to prevent. Tune corners on that fallback through
+ * `--card-clip-radius`, never by editing the classes below.
  */
 const cardClipPath =
   "shape(from var(--card-clip-radius) 0px, line to calc(100% - var(--card-clip-radius)) 0px, curve to 100% var(--card-clip-radius) with calc(100% - var(--card-clip-handle)) 0px / 100% var(--card-clip-handle), line to 100% calc(100% - var(--card-clip-radius)), curve to calc(100% - var(--card-clip-radius)) 100% with 100% calc(100% - var(--card-clip-handle)) / calc(100% - var(--card-clip-handle)) 100%, line to var(--card-clip-radius) 100%, curve to 0px calc(100% - var(--card-clip-radius)) with var(--card-clip-handle) 100% / 0px calc(100% - var(--card-clip-handle)), line to 0px var(--card-clip-radius), curve to var(--card-clip-radius) 0px with 0px var(--card-clip-handle) / var(--card-clip-handle) 0px, close)";
@@ -47,6 +55,25 @@ export function SquircleSurface({
     props: mergeProps<"div">(defaultProps, props),
     render,
   });
+}
+
+/**
+ * The header's chip slot. A card body knows things about its data the shell
+ * cannot — chiefly whether the numbers are behind — and the place to say so
+ * is beside the title ("Browsers · Catching up"), not somewhere over the
+ * rows. The body cannot render into the header from below, so the shell
+ * offers a setter: register a node and the header shows it, aligned on the
+ * title's own centreline; clear it (or unmount) and the header is clean.
+ */
+const HeaderChipContext = React.createContext<
+  ((chip: React.ReactNode) => void) | null
+>(null);
+
+/** `null` outside a `SquircleCard` — callers must tolerate having no slot. */
+export function useSquircleCardHeaderChip():
+  | ((chip: React.ReactNode) => void)
+  | null {
+  return React.useContext(HeaderChipContext);
 }
 
 type SquircleCardProps = {
@@ -92,6 +119,7 @@ export function SquircleCard({
   className,
   contentClassName,
 }: SquircleCardProps): React.ReactElement {
+  const [headerChip, setHeaderChip] = React.useState<React.ReactNode>(null);
   const seeAllClassName =
     "group/seeall flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium text-muted-foreground outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/50 hover:bg-accent/60 hover:text-foreground";
   const seeAllBody = (
@@ -112,10 +140,18 @@ export function SquircleCard({
       )}
     >
       <div className="flex items-center justify-between gap-2 pb-2 pl-3.5 pr-2 pt-1.5">
-        <h2 className="flex items-center gap-2 text-sm font-medium text-foreground/80 ml-1 [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground">
-          {icon}
-          {title}
-        </h2>
+        {/* Title and chip share one centreline on purpose: the chip is part
+            of the title's statement ("Browsers, catching up"), so it may not
+            ride higher or lower than the words it qualifies. It sits outside
+            the h2 so the heading's svg sizing never reaches the badge's own
+            icon disc. */}
+        <div className="ml-1 flex min-w-0 items-center gap-2">
+          <h2 className="flex min-w-0 items-center gap-2 text-sm font-medium text-foreground/80 [&_svg]:size-4 [&_svg]:shrink-0 [&_svg]:text-muted-foreground">
+            {icon}
+            {title}
+          </h2>
+          {headerChip}
+        </div>
         {hideSeeAll ? null : onSeeAll ? (
           <button
             type="button"
@@ -133,15 +169,26 @@ export function SquircleCard({
       <SquircleSurface
         className={cn(
           // Fixed five-row height (5 × 32px rows + py-2): cards never grow
-          // with their data — anything longer scrolls inside. Override via
+          // with their data; anything longer scrolls inside. Override via
           // contentClassName.
+          // `grow` beside the fixed height, and specifically NOT `flex-1`:
+          // grow keeps `h-44` as the flex basis, so a card sizing itself is
+          // exactly as tall as it always was and long lists still scroll,
+          // while inside a grid row stretched by a taller neighbour (the
+          // locations card's dropdown title is a few pixels taller than a
+          // plain one) the panel takes up the slack instead of stopping
+          // short and leaving a strip of card under the recess. `flex-1`
+          // zeroes the basis, which hands the panel its content height and
+          // un-caps every long list.
           // overflow-hidden clips the row hover highlight to the rounded
           // corners on the first/last rows
-          "h-44 overflow-hidden rounded-[22px] border border-border py-2 bg-[#f6f6f6] shadow-[0_1px_2px_rgba(0,0,0,0.06)] [--card-clip-radius:12px] sm:rounded-[44px] sm:[--card-clip-radius:17px]",
+          "h-44 grow overflow-hidden rounded-[22px] border border-border py-2 bg-[#f6f6f6] shadow-[0_1px_2px_rgba(0,0,0,0.06)] [--card-clip-radius:12px] sm:rounded-[44px] sm:[--card-clip-radius:17px]",
           contentClassName,
         )}
       >
-        {children}
+        <HeaderChipContext.Provider value={setHeaderChip}>
+          {children}
+        </HeaderChipContext.Provider>
       </SquircleSurface>
     </SquircleSurface>
   );

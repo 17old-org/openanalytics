@@ -106,6 +106,7 @@ export {
   SMTP_IMPLICIT_TLS_PORT,
   type EmailLogFn,
   type EmailMessage,
+  type EmailSendOptions,
   type EmailSendOutcome,
   type EmailTransport,
   type LogEmailTransport,
@@ -152,6 +153,31 @@ export {
   STRIPE_REVENUE_PROVIDER_ID,
   createStripeRevenueAdapter,
 } from './stripe-revenue.ts'
+
+/**
+ * The second revenue provider (ADR-0033 D1's promise, and the D9 follow-up row
+ * for Polar). An adapter and a catalog flip — no migration, no environment
+ * variable, no OpenAPI change.
+ */
+export {
+  POLAR_API_BASE,
+  POLAR_LIST_PAGE_SIZE,
+  POLAR_REVENUE_PROVIDER_ID,
+  createPolarRevenueAdapter,
+} from './polar-revenue.ts'
+
+/**
+ * The Standard Webhooks verifier, beside the Stripe one. Exported because the
+ * webhook suites sign with it, and because the next provider on the D9 list that
+ * uses the scheme should find it rather than write a second copy.
+ */
+export {
+  STANDARD_WEBHOOK_TOLERANCE_SECONDS,
+  verifyStandardWebhookSignature,
+  type StandardWebhookFailure,
+  type StandardWebhookResult,
+  type StandardWebhookSecretEncoding,
+} from './standard-webhooks-signature.ts'
 
 /**
  * The assistant's model provider (ADR-0046, D6). No SDK, for the reason the

@@ -16,6 +16,7 @@ import { useParams } from "next/navigation";
 import * as React from "react";
 import { Favicon } from "@/components/dashboard/site-favicon";
 import { anonName } from "@/components/dashboard/anon-identity";
+import { timeAgo, useClockBucket } from "@/components/dashboard/realtime-clock";
 import { RealtimeConnectionBanner } from "@/components/dashboard/realtime-status";
 import { JourneyEntryRow } from "@/components/dashboard/revenue-transactions";
 import {
@@ -133,17 +134,11 @@ type AnonVisitor = {
 };
 
 /**
- * The wall clock as an external store, in 10-second buckets: reading time in
- * render is impure (react-hooks/purity), so the components subscribe to this
- * instead — event ages recompute on each tick for free. The bucket keeps
- * `getSnapshot` stable between ticks, which `useSyncExternalStore` requires.
+ * The wall clock and the age vocabulary both moved to `realtime-clock.ts`
+ * when the overview card started listing the same visitors this board does:
+ * one clock and one phrasing, so a person is never "now" here and "12s ago"
+ * there.
  */
-const subscribeClock = (onChange: () => void) => {
-  const timer = setInterval(onChange, 10_000);
-  return () => clearInterval(timer);
-};
-const readClockBucket = () => Math.floor(Date.now() / 10_000);
-const readClockBucketServer = () => 0;
 
 /* Anonymous identity (name from hash) lives in anon-identity.ts — shared
    with the globe so the same hash is the same face everywhere. */
@@ -154,13 +149,6 @@ const DEVICE_LABEL: Record<string, string> = {
   tablet: "Tablet",
   unknown: "Other",
 };
-
-function timeAgo(secondsAgo: number): string {
-  if (secondsAgo < 15) return "now";
-  if (secondsAgo < 60) return `${secondsAgo}s ago`;
-  if (secondsAgo < 3600) return `${Math.floor(secondsAgo / 60)}m ago`;
-  return `${Math.floor(secondsAgo / 3600)}h ago`;
-}
 
 /** Regional-indicator flag for an iso2 code; a globe for "unknown". */
 /** "2:13 PM" — the session card's wall-clock stamp. */
@@ -404,11 +392,7 @@ export function RealtimeBoard() {
     }
   };
 
-  const clockBucket = React.useSyncExternalStore(
-    subscribeClock,
-    readClockBucket,
-    readClockBucketServer
-  );
+  const clockBucket = useClockBucket();
 
   /**
    * The page-view feed, normalized. `null` only while the first snapshot is
@@ -705,14 +689,36 @@ export function RealtimeBoard() {
       ? (visitors.find((visitor) => visitor.hash === activeHash)?.events[0]
           ?.event_id ?? null)
       : null;
-  const [trail, setTrail] = React.useState<{
-    hash: string;
+  type TrailEntry = {
     sessions: readonly VisitorSession[];
     /** CP7's owner-only additions; `?? null`/`?? []` because they are
      * optional by absence, and absence must render as nothing. */
     revenue: VisitorRevenue | null;
     revenueEvents: readonly RevenueJourneyEntry[];
-  } | null>(null);
+  };
+  /**
+   * Answered trails, kept per visitor rather than one slot.
+   *
+   * With a single slot, every switch to a different visitor started from
+   * nothing: `trailLoaded` went false, the skeleton painted, and on a fast
+   * api the answer landed ~150 ms later — a blink on every open. The file
+   * already refuses to blink on the refresh paths (the 30 s bucket and a
+   * fresh live event overwrite the old answer only when the new one lands);
+   * this extends the same rule to switching visitors. A visitor opened
+   * before shows their last answer instantly and the refetch below revises
+   * it silently; the skeleton is left meaning what it says, a visitor this
+   * session has never answered for.
+   *
+   * The loading-versus-empty doctrine is untouched: an answered-and-empty
+   * trail is cached as `sessions: []`, which is loaded, not loading.
+   * Bounded because a realtime board can be clicked through all evening;
+   * past the cap the oldest entry leaves, and a re-answered visitor is
+   * re-inserted so recency is what the order tracks.
+   */
+  const TRAIL_CACHE_LIMIT = 20;
+  const [trails, setTrails] = React.useState<ReadonlyMap<string, TrailEntry>>(
+    () => new Map()
+  );
   React.useEffect(() => {
     // The refresh bucket retires this effect every 30 s while the modal is
     // open, and a new live event retires it immediately; the fetch itself
@@ -733,11 +739,22 @@ export function RealtimeBoard() {
           { signal: controller.signal }
         );
         if (!cancelled) {
-          setTrail({
-            hash: activeHash,
-            sessions: response.sessions,
-            revenue: response.revenue ?? null,
-            revenueEvents: response.revenue_events ?? [],
+          setTrails((previous) => {
+            const next = new Map(previous);
+            // Delete-then-set so a refreshed visitor moves to the young end;
+            // the eviction below trims from the old end.
+            next.delete(activeHash);
+            next.set(activeHash, {
+              sessions: response.sessions,
+              revenue: response.revenue ?? null,
+              revenueEvents: response.revenue_events ?? [],
+            });
+            while (next.size > TRAIL_CACHE_LIMIT) {
+              const oldest = next.keys().next().value;
+              if (oldest === undefined) break;
+              next.delete(oldest);
+            }
+            return next;
           });
         }
       } catch {
@@ -750,10 +767,8 @@ export function RealtimeBoard() {
       controller.abort();
     };
   }, [slug, activeHash, trailRefresh, newestLiveEventId]);
-  const serverSessions =
-    active !== null && trail !== null && trail.hash === active.hash
-      ? trail.sessions
-      : null;
+  const trail = active !== null ? (trails.get(active.hash) ?? null) : null;
+  const serverSessions = trail !== null ? trail.sessions : null;
   /**
    * The modal's revenue facts. The trail's own answer wins (same window,
    * same read as the sessions on screen); until it lands, the row marker
@@ -764,15 +779,10 @@ export function RealtimeBoard() {
   const activeRevenue =
     active === null
       ? null
-      : ((trail !== null && trail.hash === active.hash
-          ? trail.revenue
-          : null) ??
+      : ((trail !== null ? trail.revenue : null) ??
         revenueByHash.get(active.hash) ??
         null);
-  const activeRevenueEvents =
-    active !== null && trail !== null && trail.hash === active.hash
-      ? trail.revenueEvents
-      : [];
+  const activeRevenueEvents = trail !== null ? trail.revenueEvents : [];
   /**
    * "No sessions yet" and "not answered yet" are different facts. Until the
    * trail read resolves for *this* hash, the journey band shows a
@@ -1251,20 +1261,38 @@ export function RealtimeBoard() {
                                 last 24 hours. Presence is refreshed by any
                                 activity, so somebody can be here without one.
                               </motion.p>
-                            ) : (
-                              // Not answered yet — a placeholder card, so an
-                              // empty band is never mistaken for "no history".
-                              <motion.div variants={MODAL_ITEM}>
-                                <div className="flex flex-col gap-2.5 rounded-[24px] border border-border bg-card p-4 sm:rounded-[36px]">
-                                  <SkeletonBar className="h-3.5 w-28" />
-                                  <SkeletonBar className="h-3 w-44" />
-                                  <SkeletonBar className="h-3 w-32" />
-                                </div>
-                              </motion.div>
-                            )
+                            ) : // Not answered yet: nothing at all, on
+                            // purpose. A placeholder card used to stand here
+                            // so an empty band could not be read as "no
+                            // history" — but the sentence above is what makes
+                            // that claim, and it is already gated on the
+                            // answer, so silence cannot be mistaken for it.
+                            // What the placeholder did instead was blink: it
+                            // animated in, and 150-300 ms later the real
+                            // cards animated in over it, on every first open
+                            // of a visitor. Saying nothing for one beat is
+                            // quieter than saying something false-looking
+                            // twice.
+                            null
                           ) : null}
                           {sessionsForModal.map((session, index) => (
-                            <motion.div key={session.id} variants={MODAL_ITEM}>
+                            // The newest card is keyed by its *slot*, not by
+                            // its session id, and that is what stops an
+                            // online visitor's modal from blinking. Before
+                            // the trail answers, this slot holds the live
+                            // feed's own pages under the id `current`; when
+                            // the answer lands it becomes a real session id.
+                            // Keyed by id, that swap unmounted the card and
+                            // mounted another, replaying the enter animation
+                            // a beat after the modal opened. Keyed by slot,
+                            // the same card takes on the fuller history in
+                            // place. The rest keep their real ids, so a
+                            // session that arrives later still animates in
+                            // as the new thing it is.
+                            <motion.div
+                              key={index === 0 ? "current-session" : session.id}
+                              variants={MODAL_ITEM}
+                            >
                               {/* overview-card anatomy: squircle frame, meta
                                   in the top strip, pageviews on the inset
                                   panel; newest page sits on top */}

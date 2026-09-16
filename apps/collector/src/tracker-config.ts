@@ -1,5 +1,4 @@
 import { ApiError, trackerConfigSchema, type TrackerConfig } from '@openanalytics/contracts'
-import { verifyPreviewToken } from '@openanalytics/auth'
 import { Hono } from 'hono'
 
 /**
@@ -30,17 +29,6 @@ export interface TrackerConfigRecord {
 export interface TrackerConfigStore {
   /** Resolves a public tracking key. `null` when no live site matches. */
   find(trackingKey: string): Promise<TrackerConfigRecord | null>
-  /**
-   * Resolves the same key but serves one *unpublished* definition version's
-   * rules instead of the published set (ADR-0034, D6).
-   *
-   * `null` when the key does not resolve, or when the token names a site other
-   * than the one the key belongs to, or when that version does not exist.
-   */
-  findPreview?(
-    trackingKey: string,
-    preview: { definitionId: string; version: number; siteId: string },
-  ): Promise<TrackerConfigRecord | null>
 }
 
 /**
@@ -52,14 +40,15 @@ export interface TrackerConfigStore {
 export const TRACKER_CONFIG_CACHE_CONTROL = 'public, max-age=300, stale-while-revalidate=3600'
 
 export function etagFor(record: TrackerConfigRecord): string {
-  return `"oa-${record.siteId}-${record.config.config_version}"`
+  // The paused light is part of the tag (ADR-0074, amendment 2): the paused
+  // state moves without a `config_version` bump, and a body changing under a stable
+  // tag is precisely the stale-304 trap — a browser would revalidate its
+  // cached "paused" forever and never notice the window reopening.
+  const paused = record.config.collection_paused === true ? '-paused' : ''
+  return `"oa-${record.siteId}-${record.config.config_version}${paused}"`
 }
 
-export function createTrackerConfigRoutes(
-  store: TrackerConfigStore | undefined,
-  /** `PREVIEW_TOKEN_VERIFY_KEY`. Absent, `?preview=` is ignored entirely. */
-  verifyKey?: string | undefined,
-) {
+export function createTrackerConfigRoutes(store: TrackerConfigStore | undefined) {
   const routes = new Hono()
 
   routes.get('/config', async (c) => {
@@ -78,32 +67,9 @@ export function createTrackerConfigRoutes(
       })
     }
 
-    // A preview request (ADR-0034, D6). The token is the only way an
-    // *unpublished* rule ever reaches a browser, so an unverifiable one is
-    // served as no preview at all rather than as an unauthenticated one: the
-    // request falls through to the published set below. Silently, and
-    // deliberately — an expired token during a preview session should show the
-    // user their live rules, not an error page on their own site.
-    const previewToken = c.req.query('preview')
-    if (previewToken !== undefined && previewToken !== '' && verifyKey && store.findPreview) {
-      const verified = verifyPreviewToken(previewToken, { verifyKey, now: new Date() })
-      if (verified.ok) {
-        const preview = await store.findPreview(key, {
-          definitionId: verified.claims.definition_id,
-          version: verified.claims.version,
-          siteId: verified.claims.site_id,
-        })
-        if (preview) {
-          // Never cached, at any layer. A preview is a temporary override of the
-          // site's real configuration, and one cached for even five minutes
-          // would outlive the session it belongs to and follow a real visitor
-          // around — the tracker's own localStorage copy included.
-          c.header('Cache-Control', 'no-store')
-          return c.json(trackerConfigSchema.parse(preview.config))
-        }
-      }
-    }
-
+    // `?preview=` is intentionally not read here. The rule-preview mechanism
+    // was retired by ADR-0068; a stale dashboard URL still carrying the
+    // parameter gets the published configuration like any other request.
     const record = await store.find(key)
     if (!record) {
       throw new ApiError('SITE_NOT_FOUND', 'No site matches this tracking key.')

@@ -9,6 +9,7 @@ import { MoreVerticalCircleIcon } from "@/components/icons/hugeicons";
 import { AnimatePresence, motion } from "motion/react";
 import Link from "next/link";
 import * as React from "react";
+import { publishPosterSite } from "@/components/dashboard/overview-poster-store";
 import { SiteMark } from "@/components/dashboard/site-favicon";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { listSites, LIVE_API, type SiteSummary } from "@/lib/api";
@@ -95,6 +96,18 @@ export function SiteSwitcher({ currentSlug, onSelect }: SiteSwitcherProps) {
   // A slug the caller cannot see (a stale deep link) simply has no row here;
   // the trigger then keeps showing the slug rather than guessing a name.
   const current = items.find((site) => site.slug === currentSlug) ?? null;
+
+  // The one place the current site's name and domains are already known,
+  // handed to the overview poster so it can wear the same mark this
+  // trigger does without a second sites read.
+  React.useEffect(() => {
+    if (!current) return;
+    publishPosterSite({
+      slug: current.slug,
+      name: current.name,
+      domains: current.domains ?? [],
+    });
+  }, [current]);
 
   return (
     <div ref={rootRef} className="relative">

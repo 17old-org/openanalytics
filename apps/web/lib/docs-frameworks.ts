@@ -93,6 +93,54 @@ export const DOC_FRAMEWORKS: DocFramework[] = [
     ],
   },
   {
+    slug: "tanstack-start",
+    name: "TanStack Start",
+    cliDetects: true,
+    steps: [
+      {
+        text: "TanStack Start has no static HTML file; the document shell and its head are declared on the root route. Add the script to the scripts array returned by head() there, next to your meta and links. On Solid Start the shape is the same; the import comes from @tanstack/solid-router.",
+        code: `import { createRootRoute, HeadContent, Scripts } from "@tanstack/react-router";
+
+export const Route = createRootRoute({
+  head: () => ({
+    meta: [{ charSet: "utf-8" }],
+    scripts: [
+      {
+        src: "${COLLECTOR_BASE_URL}/oa.js",
+        async: true,
+        "data-key": "YOUR_TRACKING_KEY",
+        "data-collector": "${COLLECTOR_BASE_URL}",
+      },
+    ],
+  }),
+  shellComponent: RootDocument,
+});`,
+        caption: "src/routes/__root.tsx",
+      },
+      {
+        text: "Make sure <HeadContent /> is rendered inside <head> in your root document; it is what turns the head() entries into tags. Every Start starter already has it.",
+        code: `function RootDocument({ children }) {
+  return (
+    <html>
+      <head>
+        <HeadContent />
+      </head>
+      <body>
+        {children}
+        <Scripts />
+      </body>
+    </html>
+  );
+}`,
+        caption: "src/routes/__root.tsx",
+      },
+      {
+        text: "Router navigation is tracked automatically; the root route stays mounted across client-side transitions, so the tag loads once and follows every route change.",
+      },
+      VERIFY_STEP,
+    ],
+  },
+  {
     slug: "react",
     name: "React (Vite / CRA)",
     cliDetects: true,

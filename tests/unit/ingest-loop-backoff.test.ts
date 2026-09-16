@@ -56,6 +56,7 @@ function buildDeps(overrides: Partial<IngestDeps>): IngestDeps {
       publishDeadLetter: () => Promise.resolve(0),
       trimAcked: () => Promise.resolve({ trimmed: 0, minId: '0-0' }),
       oldestPendingAgeMs: () => Promise.resolve(null),
+      memoryUsageRatio: () => Promise.resolve(null),
     },
     clickhouse: {
       insertEvents: () => Promise.reject(new Error('unused')),

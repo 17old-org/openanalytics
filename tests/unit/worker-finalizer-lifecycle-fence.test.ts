@@ -45,7 +45,7 @@ const store = {
   listSitesToFinalize: async () => await Promise.resolve([...discovered]),
   readWindowEvents: async (input: { siteId: string }) => {
     readWindow.push(input.siteId)
-    return await Promise.resolve([])
+    return await Promise.resolve({ events: [], truncated: false, lastOccurredMs: null })
   },
   readStoredFacts: async () => await Promise.resolve([]),
   insertFactVersions: async () => {

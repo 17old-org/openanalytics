@@ -396,9 +396,92 @@ export function customEventSamplesOperationFor(sourceRollup: RollupResolution): 
     : 'analytics.custom_event_samples_hour'
 }
 
+/**
+ * The entry/exit/bounce operation for a resolved aggregate grain (ADR-0075,
+ * D-E1).
+ *
+ * Its own function rather than a `REPORT_SLUGS` entry, for the reason
+ * `customEventSamplesOperationFor` gives above: it is not a report. It produces
+ * no rows a caller reads on their own, it decorates the pages report with four
+ * fields, and it takes neither the zone nor the import parameters the report
+ * family takes — an imported provider day has no session in it, so there is
+ * nothing on that side of the cutover for it to partition. It is therefore
+ * absent from `TIMEZONE_OPERATIONS` and from both import sets below, and the
+ * registry walk in `tests/unit/query-gateway-operations.test.ts` is what keeps
+ * that absence true rather than assumed.
+ */
+export function pageSessionsOperationFor(sourceRollup: RollupResolution): string {
+  return sourceRollup === '1d' ? 'analytics.page_sessions_day' : 'analytics.page_sessions_hour'
+}
+
 /** The overview operation ID for a resolved aggregate grain. */
 export function overviewOperationFor(sourceRollup: RollupResolution): string {
   return sourceRollup === '1d' ? 'analytics.overview_day' : 'analytics.overview_hour'
+}
+
+/**
+ * Longest range a filtered read may cover, in days (ADR-0075, D-F5).
+ *
+ * The gateway's filtered operations cap the same span in their own parameter
+ * schemas, and this is not a duplicate of that: the schema's refusal reaches a
+ * client as a generic operation-parameter failure, while a request that is
+ * refused HERE is refused by name, with the cap and the requested span in the
+ * error details, before any query is signed. The frontend has committed to
+ * building that screen, and it needs something to render.
+ */
+export const FILTERED_MAX_SPAN_DAYS = 92
+
+/**
+ * Every filtered operation the gateway registers.
+ *
+ * Written out rather than derived by string surgery alone, because the surgery
+ * is what decides whether a report is filterable at all: `custom_events` and
+ * `performance` have no filtered counterpart in v1, and mapping their ids by
+ * pattern would produce an operation name the gateway rejects as unknown —
+ * a 400 that says nothing, where the api should say "this report does not take
+ * a filter yet".
+ */
+const FILTERED_OPERATIONS: ReadonlySet<string> = new Set([
+  'analytics.filtered_overview_hour',
+  'analytics.filtered_overview_day',
+  'analytics.filtered_timeseries_minute',
+  'analytics.filtered_timeseries_hour',
+  'analytics.filtered_timeseries_day',
+  'analytics.filtered_timeseries_day_utc',
+  'analytics.filtered_timeseries_week',
+  'analytics.filtered_timeseries_week_utc',
+  'analytics.filtered_pages_hour',
+  'analytics.filtered_pages_day',
+  'analytics.filtered_sources_hour',
+  'analytics.filtered_sources_day',
+  'analytics.filtered_geography_hour',
+  'analytics.filtered_geography_day',
+  'analytics.filtered_devices_hour',
+  'analytics.filtered_devices_day',
+  'analytics.filtered_page_sessions_hour',
+  'analytics.filtered_page_sessions_day',
+])
+
+/** The reports a filter may be applied to in v1 (ADR-0075, D-F2). */
+export const FILTERABLE_REPORT_SLUGS: readonly ReportSlug[] = [
+  'pages',
+  'sources',
+  'geography',
+  'devices',
+]
+
+/**
+ * The filtered twin of an unfiltered operation, or `null` when it has none.
+ *
+ * The ids are parallel on purpose — `analytics.pages_hour` and
+ * `analytics.filtered_pages_hour` — so the grain decision is made ONCE, by the
+ * same resolver, and the filter only chooses which of two families answers it.
+ * A second grain selector for filtered reads is how the two would eventually
+ * disagree about what "today" means.
+ */
+export function filteredOperationFor(operation: string): string | null {
+  const candidate = operation.replace(/^analytics\./, 'analytics.filtered_')
+  return FILTERED_OPERATIONS.has(candidate) ? candidate : null
 }
 
 /**
@@ -535,6 +618,20 @@ export const TIMEZONE_OPERATIONS: ReadonlySet<string> = new Set([
   // bound to any of the three is a "bound unused parameter" rejection.
   'analytics.revenue_timeseries_hour',
   'analytics.revenue_timeseries_day_local',
+  // The filtered charts (ADR-0075). Only the four that bucket in local time:
+  // the two UTC variants take no zone, and the filtered breakdowns and totals
+  // have no bucket to label and no cutover to render, so a zone bound to any of
+  // them is a "bound unused parameter" rejection — the same rule, applied to a
+  // second family.
+  //
+  // `operationParamsFor` reads this set for the UNFILTERED operation id and the
+  // filtered read binds its own zone from the same answer, which is why both
+  // spellings of one grain must be listed together or a filtered hour chart
+  // would silently lose its timezone.
+  'analytics.filtered_timeseries_minute',
+  'analytics.filtered_timeseries_hour',
+  'analytics.filtered_timeseries_day',
+  'analytics.filtered_timeseries_week',
 ])
 
 /**

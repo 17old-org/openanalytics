@@ -5,10 +5,16 @@ import {
   utcInstantSchema,
   type Resolution,
 } from '@openanalytics/contracts'
-import { funnelConfigSchema, roleHasCapability, type FunnelScope } from '@openanalytics/domain'
+import {
+  funnelConfigSchema,
+  parseAnalyticsFilters,
+  roleHasCapability,
+  type AnalyticsFilter,
+  type FunnelScope,
+} from '@openanalytics/domain'
 import { getFinalizerState, listEventDisplayNames, type Database } from '@openanalytics/postgres'
 import { Hono } from 'hono'
-import type { AnalyticsReportRequest, AnalyticsService } from '../analytics/service.ts'
+import type { AnalyticsReportRequest, AnalyticsService, PagesSort } from '../analytics/service.ts'
 import { requireAnalyticsAccess, siteMembership, type ApiVariables } from './middleware.ts'
 
 /**
@@ -108,6 +114,50 @@ export const OVERVIEW_RESOLUTIONS: readonly Resolution[] = ['hour', 'day']
  * change, and the ADR decision that narrows it is what should change it.
  */
 export const PUBLIC_TIMESERIES_RESOLUTIONS = TIMESERIES_RESOLUTIONS
+
+/**
+ * The session-scoped filter set (ADR-0075, D-F1 … D-F5).
+ *
+ * Parsed and refused at the EDGE, in the domain grammar both read surfaces
+ * share, so the dashboard, `/v1/read` and MCP cannot end up with three dialects
+ * of one idea. An absent parameter is the empty set — the unfiltered read, which
+ * must stay on the rollups (D-F4) — and a present but unusable one is a named
+ * `VALIDATION_FAILED` that carries the offending dimension and the supported
+ * list in `details`, so a client can render the refusal rather than guess at it.
+ *
+ * The refusal shape is `readReturnTo`'s, deliberately: a value the caller
+ * believed was doing something, that silently would not have, is worth naming.
+ */
+export function parseFilters(query: Record<string, string | undefined>): AnalyticsFilter[] {
+  const parsed = parseAnalyticsFilters(query['filters'])
+  if (parsed.ok) return [...parsed.filters]
+  throw new ApiError('VALIDATION_FAILED', parsed.message, {
+    details: {
+      ...(parsed.dimension === undefined ? {} : { dimension: parsed.dimension }),
+      ...(parsed.operator === undefined ? {} : { operator: parsed.operator }),
+      ...(parsed.supported === undefined ? {} : { supported: parsed.supported }),
+      issues: [{ path: 'filters', message: parsed.message }],
+    },
+  })
+}
+
+/**
+ * The pages report's sort key (ADR-0075, D-E2).
+ *
+ * Validated at the edge and refused **by name**, the shape `readReturnTo` uses
+ * for the same kind of mistake: an absent value is the default rather than an
+ * error, so every caller written before this parameter existed keeps working,
+ * and a present-but-unknown value is named — because the caller believed it was
+ * choosing an order and silently would not have been.
+ */
+export function parsePagesSort(query: Record<string, string | undefined>): PagesSort {
+  const raw = query['sort']
+  if (raw === undefined) return 'views'
+  if (raw === 'views' || raw === 'entrances' || raw === 'exits') return raw
+  throw new ApiError('VALIDATION_FAILED', 'sort must be one of: views, entrances, exits', {
+    details: { issues: [{ path: 'sort', message: 'must be one of: views, entrances, exits' }] },
+  })
+}
 
 export function parseLimit(query: Record<string, string | undefined>): number {
   const raw = query['limit']
@@ -279,6 +329,7 @@ export function createAnalyticsRoutes(deps: {
         cacheEpoch: c.get('siteCacheEpoch'),
         importPointer: c.get('siteImportPointer'),
         ...range,
+        filters: parseFilters(query),
         compare: parseCompare(query),
         resolution: parseResolution(query, OVERVIEW_RESOLUTIONS),
       }),
@@ -295,35 +346,72 @@ export function createAnalyticsRoutes(deps: {
         cacheEpoch: c.get('siteCacheEpoch'),
         importPointer: c.get('siteImportPointer'),
         ...range,
+        filters: parseFilters(query),
         compare: parseCompare(query),
         resolution: parseResolution(query, TIMESERIES_RESOLUTIONS),
       }),
     )
   })
 
+  /**
+   * `filterable` is per-route rather than global (ADR-0075, D-F2): custom events
+   * and performance have no filtered operation in v1, so they do not read the
+   * parameter at all and a filter sent to them is ignored rather than half-
+   * applied. The two that DO take it refuse an unknown dimension by name — the
+   * service raises the same refusal for an unfilterable report reached any other
+   * way, so there is one message for one mistake.
+   */
   const reportRoute = <T>(
     path: string,
     handler: (s: AnalyticsService, req: AnalyticsReportRequest) => Promise<T>,
+    options: { filterable?: boolean } = {},
   ) => {
     app.get(`${base}/${path}`, async (c) => {
       const { siteId } = c.get('membership')
-      const range = parseRange(c.req.query())
+      const query = c.req.query()
+      const range = parseRange(query)
       return c.json(
         await handler(service, {
           siteId,
           cacheEpoch: c.get('siteCacheEpoch'),
           importPointer: c.get('siteImportPointer'),
           ...range,
-          limit: parseLimit(c.req.query()),
+          limit: parseLimit(query),
+          ...(options.filterable === true ? { filters: parseFilters(query) } : {}),
         }),
       )
     })
   }
 
-  reportRoute('pages', (s, req) => s.pages(req))
-  reportRoute('sources', (s, req) => s.sources(req))
-  reportRoute('geography', (s, req) => s.geography(req))
-  reportRoute('devices', (s, req) => s.devices(req))
+  /**
+   * Top pages, with entry, exit and bounce (ADR-0075, D-E1).
+   *
+   * Its own route rather than a `reportRoute` entry, because it is the one
+   * report that takes a parameter the others do not — and because the session
+   * decoration is asked for HERE rather than defaulted in the service: the
+   * public share and the widget read call the same method and must keep paying
+   * for one query, not two.
+   */
+  app.get(`${base}/pages`, async (c) => {
+    const { siteId } = c.get('membership')
+    const query = c.req.query()
+    const range = parseRange(query)
+    return c.json(
+      await service.pages({
+        siteId,
+        cacheEpoch: c.get('siteCacheEpoch'),
+        importPointer: c.get('siteImportPointer'),
+        ...range,
+        limit: parseLimit(query),
+        filters: parseFilters(query),
+        sessionMetrics: true,
+        sort: parsePagesSort(query),
+      }),
+    )
+  })
+  reportRoute('sources', (s, req) => s.sources(req), { filterable: true })
+  reportRoute('geography', (s, req) => s.geography(req), { filterable: true })
+  reportRoute('devices', (s, req) => s.devices(req), { filterable: true })
   /**
    * Custom events, decorated with their dashboard labels (ADR-0034, D7).
    *

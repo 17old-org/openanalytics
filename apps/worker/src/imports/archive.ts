@@ -103,6 +103,33 @@ export interface ArchiveBudgets {
   readonly maxRowBytes: number
 }
 
+/**
+ * The archive-wide uncompressed budget, and what each entry has already spent of
+ * it.
+ *
+ * The per-entry ledger exists because **an entry can legitimately be read more
+ * than once**: an adapter whose one file fills eight reports has the pipeline
+ * inflate it once per report (`reportsForEntry`), and a resume re-parses from
+ * the beginning of the archive. Counting every read would make
+ * `IMPORT_MAX_TOTAL_UNCOMPRESSED_BYTES` fire on an archive that is well inside
+ * it — the shipped numbers are a 1 GiB entry cap against a 2 GiB total, so the
+ * third pass over a large entry would trip `zip_bomb` and tell a customer their
+ * export is hostile.
+ *
+ * So an entry contributes its **high-water mark** rather than a running sum: the
+ * first read spends its bytes, later reads of the same bytes spend nothing, and
+ * a read that goes further than any before it spends only the difference. The
+ * budget still means what it says — the total distinct bytes this archive can be
+ * made to produce — and no re-read can inflate past it.
+ *
+ * Keyed on the entry **object**, not its name: names are normalised to a
+ * basename, so two members in different directories can share one.
+ */
+interface ArchiveTotals {
+  uncompressed: number
+  readonly counted: Map<ArchiveEntry, number>
+}
+
 export interface ArchiveEntry {
   /** As stored in the archive, normalised to forward slashes and without a
    * leading directory component. Never used as a filesystem path — nothing here
@@ -384,7 +411,7 @@ export async function openZipArchive(input: OpenZipArchiveInput): Promise<ZipArc
 
     // Shared across every entry read from this archive, which is what makes the
     // *total* budget a total rather than a per-entry limit applied twice.
-    const totals = { uncompressed: 0 }
+    const totals: ArchiveTotals = { uncompressed: 0, counted: new Map() }
 
     return {
       entries,
@@ -460,7 +487,7 @@ async function* readEntryLines(
   handle: FileHandle,
   entry: ArchiveEntry,
   budgets: ArchiveBudgets,
-  totals: { uncompressed: number },
+  totals: ArchiveTotals,
 ): AsyncIterable<string> {
   const start = await resolveDataOffset(handle, entry)
   const end = start + entry.compressedSize - 1
@@ -474,10 +501,17 @@ async function* readEntryLines(
 
   let entryBytes = 0
   let pending: Buffer = Buffer.alloc(0)
+  // What this entry has already contributed to the archive total on an earlier
+  // read. See `ArchiveTotals`.
+  let alreadyCounted = totals.counted.get(entry) ?? 0
 
   const consume = function* (chunk: Buffer): Generator<string> {
     entryBytes += chunk.length
-    totals.uncompressed += chunk.length
+    if (entryBytes > alreadyCounted) {
+      totals.uncompressed += entryBytes - alreadyCounted
+      alreadyCounted = entryBytes
+      totals.counted.set(entry, alreadyCounted)
+    }
     if (entryBytes > budgets.maxEntryBytes) {
       fail('entry_too_large', 'archive entry inflates past the entry budget', {
         entry: entry.name,

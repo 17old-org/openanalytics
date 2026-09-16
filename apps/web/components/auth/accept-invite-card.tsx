@@ -15,23 +15,37 @@ import {
   team,
   type AcceptedInvite,
 } from "@/lib/api";
-import { useSession } from "@/lib/auth-client";
+import {
+  authErrorFromThrown,
+  presentAuthError,
+  signOut as endSession,
+  useSession,
+} from "@/lib/auth-client";
 
 /**
  * `POST /v1/invites/accept` with the token from the email link.
  *
- * The branches the contract names:
- *  - 403 — signed in with a different email than the invitation's. The remedy
- *    is switching accounts, not retrying.
- *  - 404 — the token is invalid, expired or already used; every failure looks
- *    the same by design.
- *  - No session at all → sign in first, then come back to this same URL.
+ * The branches the contract names, each with its remedy spelled out (a
+ * member once collected six identical "Wrong account" refusals because the
+ * page named neither the session it saw nor the way out):
+ *  - 403, signed in with a different email than the invitation's. The page
+ *    says which account it is looking at and offers one button that signs out
+ *    and returns to login; retrying was never the remedy.
+ *  - 404, the token is invalid, expired or already used; every failure looks
+ *    the same by design. A resend rotates the token, so the message warns
+ *    that only the newest email's link works.
+ *  - No session at all → to login, with this URL (token and all) in `?next=`
+ *    so signing in lands back here instead of on the dashboard with a "now
+ *    find the email again" step.
  */
 
 type Phase =
   | { kind: "idle" }
   | { kind: "accepting" }
   | { kind: "accepted"; invite: AcceptedInvite }
+  /** The 403: the remedy is a different session, so it renders the current
+   *  one and the door out, not a static apology. */
+  | { kind: "wrong-account" }
   | { kind: "failed"; title: string; body: string };
 
 export function AcceptInviteCard() {
@@ -47,6 +61,52 @@ export function AcceptInviteCard() {
 
   const signedIn = LIVE_API ? session.data !== null : true;
   const pendingSession = LIVE_API && session.isPending;
+
+  /**
+   * Every "go sign in" door on this card, with the way back built in: the
+   * card's own URL rides along as `?next=`, so the login round trip ends on
+   * this invitation. Encoded at each nesting level, the token into the
+   * accept URL and the accept URL into the login query, because each layer
+   * is decoded exactly once on the way back out.
+   */
+  const loginHref =
+    token.length > 0
+      ? `/login?next=${encodeURIComponent(
+          `/invites/accept?token=${encodeURIComponent(token)}`
+        )}`
+      : "/login";
+
+  /**
+   * Signs the wrong account out and walks back to login with the invite
+   * context intact. `endSession` is the wrapper, not `authClient.signOut`:
+   * it drops the session hint first, so the login page we land on does not
+   * bounce us straight back to the dashboard (see `SignOutCorner`, which
+   * this mirrors). Failure stays on this screen, printed under the button;
+   * there is no other screen where "sign-out failed" would make sense.
+   */
+  const [switching, setSwitching] = React.useState(false);
+  const [switchError, setSwitchError] = React.useState<string | null>(null);
+  const switchAccount = async () => {
+    if (switching) return;
+    if (!LIVE_API) {
+      router.push(loginHref);
+      return;
+    }
+    setSwitching(true);
+    setSwitchError(null);
+    try {
+      const { error: raised } = await endSession();
+      if (raised) {
+        setSwitchError(presentAuthError(raised).message);
+        setSwitching(false);
+        return;
+      }
+      router.push(loginHref);
+    } catch (thrown) {
+      setSwitchError(authErrorFromThrown(thrown).message);
+      setSwitching(false);
+    }
+  };
 
   const accept = () => {
     setPhase({ kind: "accepting" });
@@ -68,22 +128,21 @@ export function AcceptInviteCard() {
       (raised: unknown) => {
         const code = errorCodeOf(raised);
         if (code === "FORBIDDEN") {
-          setPhase({
-            kind: "failed",
-            title: "Wrong account",
-            body: "This invitation was sent to a different email address. Sign out, sign in with the invited address, and open the link again.",
-          });
+          setPhase({ kind: "wrong-account" });
         } else if (code === "NOT_FOUND" || code === "SITE_NOT_FOUND") {
           setPhase({
             kind: "failed",
             title: "This invite is no longer valid",
-            body: "It may have expired, been revoked, or already been used. Ask for a fresh one.",
+            // The resend sentence is a fact of the backend: resending
+            // rotates the token, so an older email's link 404s even though
+            // the invitation itself is alive and well.
+            body: "It may have expired, been revoked, or already been used. If the invite was resent, only the newest email's link works. Ask for a fresh one.",
           });
         } else if (code === "UNAUTHENTICATED") {
           setPhase({
             kind: "failed",
             title: "Sign in first",
-            body: "Sign in with the invited email address, then open this link again.",
+            body: "Sign in with the invited email address and you'll be brought back to this invitation.",
           });
         } else {
           const presented = presentError(raised);
@@ -132,6 +191,57 @@ export function AcceptInviteCard() {
                     Open the dashboard
                   </Button>
                 </>
+              ) : phase.kind === "wrong-account" ? (
+                <>
+                  <div>
+                    <h1 className="text-base font-medium tracking-tight">
+                      Wrong account
+                    </h1>
+                    <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                      {/* Naming the session is the whole fix: six refusals
+                          in the incident because the person could not see
+                          WHICH account the page was judging. The fallback
+                          only fires if the session evaporated between the
+                          403 and this render. */}
+                      {session.data?.user.email ? (
+                        <>
+                          You&apos;re signed in as{" "}
+                          <span className="font-medium text-foreground">
+                            {session.data.user.email}
+                          </span>
+                          , but this invitation was sent to a different
+                          address.
+                        </>
+                      ) : (
+                        "This invitation was sent to a different email address than the one you're signed in with."
+                      )}
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <Button
+                      loading={switching}
+                      onClick={() => void switchAccount()}
+                      size="sm"
+                    >
+                      Sign out &amp; switch account
+                    </Button>
+                    <Button
+                      onClick={() => setPhase({ kind: "idle" })}
+                      size="sm"
+                      variant="ghost"
+                    >
+                      Try again
+                    </Button>
+                    {switchError ? (
+                      <p
+                        className="text-xs leading-5 text-destructive-foreground"
+                        role="alert"
+                      >
+                        {switchError}
+                      </p>
+                    ) : null}
+                  </div>
+                </>
               ) : phase.kind === "failed" ? (
                 <>
                   <div>
@@ -144,7 +254,7 @@ export function AcceptInviteCard() {
                   </div>
                   <div className="flex flex-col gap-2">
                     <Button
-                      render={<Link href="/login">Go to sign in</Link>}
+                      render={<Link href={loginHref}>Go to sign in</Link>}
                       size="sm"
                       variant="secondary"
                     />
@@ -181,7 +291,7 @@ export function AcceptInviteCard() {
                     </Button>
                   ) : token.length > 0 ? (
                     <Button
-                      render={<Link href="/login">Sign in to accept</Link>}
+                      render={<Link href={loginHref}>Sign in to accept</Link>}
                       size="sm"
                     />
                   ) : null}

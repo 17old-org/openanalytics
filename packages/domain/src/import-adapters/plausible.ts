@@ -1,6 +1,11 @@
 import {
+  CITY_DROPPED_WARNING,
   DIMENSION_TRUNCATED_WARNING,
+  IMPORT_DEVICE_TOKENS,
   ImportRunFailure,
+  UNKNOWN_COLUMN_WARNING,
+  importLiveCountry,
+  importLiveToken,
   scrubImportDimensionDetailed,
   type ImportAdapter,
   type ImportRowBatch,
@@ -175,31 +180,15 @@ const COLUMNS: Readonly<Record<ImportedReport, ColumnSpec>> = {
   },
 }
 
-// --- Warning codes -----------------------------------------------------------
-
-// --- The live vocabulary -----------------------------------------------------
+// --- The provider's spelling -------------------------------------------------
 
 /**
- * The token the live classifier uses when it could not tell.
+ * `BROWSER_RULES` in `anonymous-identity.ts`, keyed on what Plausible writes.
  *
- * `normalizeUserAgentClass` returns `unknown` for an unresolvable device, browser
- * or OS, so an imported row with a blank one has to say `unknown` too — an empty
- * string would be a third value that merges with neither.
- *
- * Geography is deliberately different: the live path stores `''` for a country or
- * city it could not resolve (`normalizeCountry` returns null, which reaches
- * `events_raw` as the empty string), so an imported blank country stays blank.
+ * Local to this adapter on purpose: the *rule* (translate onto the live token,
+ * lowercase what the table has not heard of) is shared in `import-adapter.ts`,
+ * and the table is a fact about Plausible.
  */
-const UNKNOWN = 'unknown'
-
-/** `UserAgentClass['deviceType']` — the only four values the live side emits. */
-const DEVICE_TOKENS: Readonly<Record<string, string>> = {
-  desktop: 'desktop',
-  mobile: 'mobile',
-  tablet: 'tablet',
-}
-
-/** `BROWSER_RULES` in `anonymous-identity.ts`, keyed on what Plausible writes. */
 const BROWSER_TOKENS: Readonly<Record<string, string>> = {
   chrome: 'chrome',
   'chrome mobile': 'chrome',
@@ -233,51 +222,8 @@ const OS_TOKENS: Readonly<Record<string, string>> = {
   chromiumos: 'chromeos',
 }
 
-/**
- * Provider spelling → this system's token.
- *
- * The fallback differs by dimension because the live vocabularies do:
- *
- * - **`closed`** is `device_type`, whose live values are exactly
- *   `desktop|mobile|tablet|unknown` (`UserAgentClass`). A fifth value cannot come
- *   out of the live classifier, so a provider's `Smart TV` has no live row to
- *   merge with and belongs in `unknown` rather than as a category only imported
- *   ranges can ever show.
- * - **`open`** is browser and OS, whose live rules name a handful of families and
- *   answer `unknown` for the rest. A browser this table has not heard of is still
- *   a real browser: lowercasing keeps it distinct, while folding it into
- *   `unknown` would merge it with the genuinely unresolvable rows.
- *
- * An empty value is `unknown` either way, which is what the live classifier
- * returns for a user agent it could not read.
- */
-function liveToken(
-  value: string,
-  table: Readonly<Record<string, string>>,
-  vocabulary: 'closed' | 'open',
-): string {
-  const lowered = value.trim().toLowerCase()
-  if (lowered === '') return UNKNOWN
-  return table[lowered] ?? (vocabulary === 'closed' ? UNKNOWN : lowered)
-}
+// --- Warning codes -----------------------------------------------------------
 
-/** ISO-3166-1 alpha-2, uppercased — `normalizeCountry`'s rule, minus the null:
- * the live rollup stores the empty string for a country it could not resolve, so
- * that is what an unusable provider value becomes here. `XX` and `T1` are the
- * placeholders some platforms send for unknown or Tor-exit addresses, and storing
- * one would put a fake nation in a customer's dashboard. */
-function liveCountry(value: string): string {
-  const upper = value.trim().toUpperCase()
-  if (!/^[A-Z]{2}$/.test(upper) || upper === 'XX' || upper === 'T1') return ''
-  return upper
-}
-
-/** The reserved code D2 names: the geography city column was present and
- * carried values this system cannot resolve. */
-export const CITY_DROPPED_WARNING = 'city_dropped'
-/** Columns the header carried that no report reads. Counted, not named: a column
- * name is provider text and this warning is rendered to the customer. */
-export const UNKNOWN_COLUMN_WARNING = 'unknown_columns'
 /** Rows whose date falls outside the range the filename declares. A warning
  * rather than a failure — the rows are real measurements and the filename is the
  * provider's own bookkeeping. */
@@ -691,7 +637,7 @@ function rowFor(
       // `city` is read only to count it for the warning; it is never carried.
       return {
         date,
-        country: liveCountry(text('country')),
+        country: importLiveCountry(text('country')),
         region: text('region'),
         visitors: count('visitors'),
         visits: count('visits'),
@@ -702,7 +648,7 @@ function rowFor(
     case 'devices':
       return {
         date,
-        device: liveToken(text('device'), DEVICE_TOKENS, 'closed'),
+        device: importLiveToken(text('device'), IMPORT_DEVICE_TOKENS, 'closed'),
         visitors: count('visitors'),
         visits: count('visits'),
         pageviews: count('pageviews'),
@@ -712,7 +658,7 @@ function rowFor(
     case 'browsers':
       return {
         date,
-        browser: liveToken(text('browser'), BROWSER_TOKENS, 'open'),
+        browser: importLiveToken(text('browser'), BROWSER_TOKENS, 'open'),
         // The version is the provider's own string and has no live counterpart
         // to agree with — nothing merges on it, so nothing translates it.
         browserVersion: text('browser_version'),
@@ -725,7 +671,7 @@ function rowFor(
     case 'os':
       return {
         date,
-        operatingSystem: liveToken(text('operating_system'), OS_TOKENS, 'open'),
+        operatingSystem: importLiveToken(text('operating_system'), OS_TOKENS, 'open'),
         osVersion: text('operating_system_version'),
         visitors: count('visitors'),
         visits: count('visits'),

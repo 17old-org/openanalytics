@@ -12,11 +12,13 @@ import {
   createImportAdapterRegistry,
   createRevenueAdapterRegistry,
   plausibleImportAdapter,
+  umamiImportAdapter,
 } from '@openanalytics/domain'
 import {
   CredentialKeyringError,
   createCredentialVault,
   createS3ObjectStorage,
+  createPolarRevenueAdapter,
   createStripeRevenueAdapter,
 } from '@openanalytics/integrations'
 import { createServiceMetrics } from '@openanalytics/observability'
@@ -252,14 +254,22 @@ if (env.DATABASE_URL) {
         })
       : undefined
 
-  // Plausible is the one production adapter (ADR-0032 D11: the other five
-  // catalog entries are follow-up sub-parts behind the same framework, and the
-  // catalog reports them `available: false`). A run naming any of them still
-  // fails `adapter_unavailable`, which is the honest answer for a build with no
-  // parser rather than a half-import. The registry is composed at startup rather
-  // than read from a module singleton so that a test drives the pipeline with
-  // exactly the adapter it means to exercise.
-  const importAdapters = createImportAdapterRegistry([plausibleImportAdapter])
+  // The two production adapters (ADR-0032 D11: the four remaining catalog
+  // entries are follow-up sub-parts behind the same framework, and the catalog
+  // reports them `available: false`). A run naming any of them still fails
+  // `adapter_unavailable`, which is the honest answer for a build with no parser
+  // rather than a half-import.
+  //
+  // **This list and the catalog's `available` flags must ship together.** The
+  // api serves the catalog, so an api ahead of a worker lets a customer create a
+  // run that then fails `adapter_unavailable`; a worker ahead of an api is
+  // harmless, because the catalog still says the provider is unavailable and
+  // nothing creates the run. That is the deploy order for every future adapter.
+  //
+  // The registry is composed at startup rather than read from a module singleton
+  // so that a test drives the pipeline with exactly the adapter it means to
+  // exercise.
+  const importAdapters = createImportAdapterRegistry([plausibleImportAdapter, umamiImportAdapter])
 
   /**
    * The revenue sync wiring (ADR-0033, D3/D4).
@@ -293,7 +303,10 @@ if (env.DATABASE_URL) {
         // Composed at startup rather than read from a module singleton, so a
         // test drives the pipeline with exactly the adapter it means to exercise
         // and production has one place where a real adapter is switched on.
-        adapters: createRevenueAdapterRegistry([createStripeRevenueAdapter()]),
+        adapters: createRevenueAdapterRegistry([
+          createStripeRevenueAdapter(),
+          createPolarRevenueAdapter(),
+        ]),
       }
     } catch (error) {
       logger.error('revenue_sync_not_started', {

@@ -147,6 +147,140 @@ export function stripeEvent(
   }
 }
 
+// --- Polar -------------------------------------------------------------------
+
+/**
+ * Polar payload builders, transcribed from **real sandbox payloads** captured on
+ * 2026-08-27 rather than from the documentation.
+ *
+ * That distinction earned its keep twice. The order below carries
+ * `platform_fee_currency: null` beside `platform_fee_amount: 0`, which is the
+ * shape a real unsettled order has and the reason `fee_currency` has three
+ * states; and the envelope carries **no `id`**, which is why the adapter reads
+ * the event id from the `webhook-id` header. A fixture invented from the docs
+ * would have had an id and the suite would have proved nothing.
+ */
+
+const POLAR_CREATED = '2026-07-31T10:00:00.000Z'
+
+/** A Polar Order, in the shape an `order.*` event's `data` has. */
+export function polarOrder(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'ord_test_1',
+    created_at: POLAR_CREATED,
+    modified_at: null,
+    status: 'paid',
+    paid: true,
+    // Polar reports the whole ladder; the adapter reads `net_amount` — after
+    // discounts, before the tax Polar remits as merchant of record.
+    subtotal_amount: 4999,
+    discount_amount: 0,
+    net_amount: 4999,
+    tax_amount: 500,
+    total_amount: 5499,
+    refunded_amount: 0,
+    refunded_tax_amount: 0,
+    currency: 'usd',
+    // The real sandbox shape: an amount with no currency beside it, which means
+    // "not settled yet" and must never read as a fee of zero.
+    platform_fee_amount: 0,
+    platform_fee_currency: null,
+    billing_reason: 'purchase',
+    checkout_id: 'chk_test_1',
+    customer_id: 'cust_test_1',
+    product_id: 'prod_test_1',
+    subscription_id: null,
+    metadata: { reference_id: 'site_order_1' },
+    customer: { id: 'cust_test_1', external_id: 'site_user_1' },
+    product: { id: 'prod_test_1', name: 'Pro plan' },
+    ...overrides,
+  }
+}
+
+/**
+ * A Polar Refund.
+ *
+ * Written from Polar's documented schema and from enums read off the API's own
+ * validation errors — **not** from an observed delivery. No live refund could be
+ * produced in the sandbox: a refund needs a non-zero paid order, and Polar's
+ * Stripe account refuses publishable-key card tokenization, so no card could be
+ * charged headlessly. Recorded here so the next person knows which of these
+ * fixtures is evidence and which is schema.
+ */
+export function polarRefund(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'ref_test_1',
+    created_at: '2026-07-31T10:01:00.000Z',
+    modified_at: null,
+    status: 'succeeded',
+    reason: 'customer_request',
+    amount: 1500,
+    tax_amount: 150,
+    currency: 'usd',
+    order_id: 'ord_test_1',
+    subscription_id: null,
+    customer_id: 'cust_test_1',
+    metadata: {},
+    ...overrides,
+  }
+}
+
+/** A Polar Checkout, in the shape a `checkout.*` event's `data` has. */
+export function polarCheckout(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 'chk_test_1',
+    created_at: POLAR_CREATED,
+    status: 'open',
+    // Null until the checkout is confirmed — the real sandbox shape.
+    customer_id: null,
+    customer_external_id: 'site_user_1',
+    metadata: { reference_id: 'site_order_1', utm_source: 'newsletter' },
+    product_id: 'prod_test_1',
+    currency: 'usd',
+    ...overrides,
+  }
+}
+
+/**
+ * The event envelope Polar wraps an object in: `{type, timestamp, data}`.
+ *
+ * **There is no `id`.** That is the whole reason `polarHeaders` exists beside
+ * this, and the reason the adapter takes an event context at all.
+ */
+export function polarEvent(
+  type: string,
+  data: Record<string, unknown>,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return { type, timestamp: POLAR_CREATED, data, ...overrides }
+}
+
+/** The delivery header set, with the event id the body does not carry. */
+export function polarHeaders(
+  overrides: Record<string, string | undefined> = {},
+): Record<string, string | undefined> {
+  return { 'webhook-id': 'whid_test_1', ...overrides }
+}
+
+/**
+ * A Polar list response: `{items, pagination: {total_count, max_page}}`.
+ *
+ * Page-number pagination, not a cursor — which is why the adapter's own cursor
+ * has to carry a pinned cutoff as well as a page.
+ */
+export function polarListPage(
+  items: readonly Record<string, unknown>[],
+  pagination: { total_count?: number; max_page?: number } = {},
+): Record<string, unknown> {
+  return {
+    items,
+    pagination: {
+      total_count: pagination.total_count ?? items.length,
+      max_page: pagination.max_page ?? 1,
+    },
+  }
+}
+
 /**
  * The ECB daily file, in the exact nesting the real document uses.
  *

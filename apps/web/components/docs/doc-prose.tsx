@@ -51,6 +51,16 @@ export function DocSection({
   );
 }
 
+/** A named cut inside a section, for a section that covers several of them
+ *  and would read as one wall of prose without the names. */
+export function DocHeading({ children }: { children: React.ReactNode }) {
+  return (
+    <h3 className="mt-2 text-[15px] font-medium tracking-tight text-foreground">
+      {children}
+    </h3>
+  );
+}
+
 export function DocList({ items }: { items: React.ReactNode[] }) {
   return (
     <ul className="flex list-disc flex-col gap-1.5 pl-5">

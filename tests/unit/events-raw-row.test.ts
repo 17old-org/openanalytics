@@ -41,7 +41,6 @@ const BASE: PersistedEvent = {
   usage_window_id: null,
   billing_grace: false,
   billable: true,
-  test_mode: false,
   rule_id: null,
   rule_version: null,
   anonymous_id: 'anon-1',
@@ -56,6 +55,8 @@ const BASE: PersistedEvent = {
     utm_campaign: null,
     utm_content: null,
     utm_term: null,
+    click_id_source: null,
+    ref_source: null,
   },
   properties: {},
   context: {
@@ -113,7 +114,6 @@ describe('folding the envelope payloads into properties', () => {
       event({
         type: 'interaction',
         billable: false,
-        test_mode: false,
         rule_id: null,
         rule_version: null,
         interaction: {
@@ -143,7 +143,6 @@ describe('folding the envelope payloads into properties', () => {
       event({
         type: 'engagement',
         billable: false,
-        test_mode: false,
         rule_id: null,
         rule_version: null,
         engagement: { active_ms: 4_000, visible_ms: 9_000 },
@@ -251,6 +250,8 @@ describe('row mapping', () => {
           utm_campaign: 'july',
           utm_content: 'hero',
           utm_term: 'analytics',
+          click_id_source: 'gclid',
+          ref_source: null,
         },
       }),
       { batchId: 'b1_abc' },
@@ -281,6 +282,25 @@ describe('row mapping', () => {
     })
   })
 
+  it('carries the ref provenance onto the row (ADR-0077, D-R2)', () => {
+    const row = toEventsRawRow(
+      event({
+        source: {
+          ...BASE.source,
+          referrer_domain: 'producthunt.com',
+          ref_source: 'producthunt',
+        },
+      }),
+      { batchId: 'b1_ref' },
+    )
+
+    expect(row.referrer_domain).toBe('producthunt.com')
+    expect(row.ref_source).toBe('producthunt')
+    // Mutually exclusive with the click-id column: both fill the same field and
+    // the collector runs only one of the two inferences.
+    expect(row.click_id_source).toBe('')
+  })
+
   it('turns every nullable envelope field into an empty string', () => {
     const row = toEventsRawRow(event({ page: null }), { batchId: 'b1_x' })
 
@@ -291,6 +311,7 @@ describe('row mapping', () => {
     expect(row.page_path).toBe('')
     expect(row.page_title).toBe('')
     expect(row.referrer_domain).toBe('')
+    expect(row.ref_source).toBe('')
   })
 
   it('carries the batch token onto every row', () => {

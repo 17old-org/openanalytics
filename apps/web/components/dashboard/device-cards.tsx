@@ -14,6 +14,7 @@ import {
   useSiteAnalytics,
 } from "@/components/dashboard/analytics-card";
 import { ImportedGapNote } from "@/components/dashboard/data-state";
+import { useAnalyticsFilters } from "@/components/dashboard/filter-context";
 import { HoverList } from "@/components/dashboard/hover-list";
 import {
   SeeAllModal,
@@ -96,7 +97,11 @@ const TECH_VIEWS: { id: TechView; label: string }[] = [
 ];
 
 export function DeviceCards() {
-  const resource = useSiteAnalytics(getAnalyticsDevices, MOCK_DEVICES);
+  const { enabled, active, filtersParam, addFilter, hasValue } =
+    useAnalyticsFilters();
+  const resource = useSiteAnalytics(getAnalyticsDevices, MOCK_DEVICES, {
+    filters: filtersParam,
+  });
   const [techView, setTechView] = React.useState<TechView>("browsers");
   const [openDevices, setOpenDevices] = React.useState(false);
   const [openTech, setOpenTech] = React.useState(false);
@@ -113,7 +118,11 @@ export function DeviceCards() {
         onSeeAll={() => setOpenDevices(true)}
       >
         <AnalyticsCardBody
-          emptyBody="No visits in this range yet."
+          emptyBody={
+            active
+              ? "No visits match these filters."
+              : "No visits in this range yet."
+          }
           isEmpty={(data) => data.items.length === 0}
           resource={resource}
         >
@@ -137,6 +146,16 @@ export function DeviceCards() {
                     }
                     key={device.label}
                     name={DEVICE_LABEL[device.label] ?? device.label}
+                    // The raw stored token ("mobile"), not the label: the
+                    // filter matches what the session entry carries. Device
+                    // type is the one dimension on this pair of cards;
+                    // browser and OS have none in v1, so those rows below
+                    // stay plain.
+                    onSelect={
+                      enabled && !hasValue("device_type", device.label)
+                        ? () => addFilter("device_type", device.label)
+                        : undefined
+                    }
                     pct={share(device.visitors)}
                     value={device.visitors.toLocaleString("en-US")}
                   />
@@ -190,7 +209,11 @@ export function DeviceCards() {
         }
       >
         <AnalyticsCardBody
-          emptyBody="No visits in this range yet."
+          emptyBody={
+            active
+              ? "No visits match these filters."
+              : "No visits in this range yet."
+          }
           isEmpty={(data) => data.items.length === 0}
           resource={resource}
         >
