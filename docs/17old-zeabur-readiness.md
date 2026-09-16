@@ -52,17 +52,19 @@ DMARC records; the domain sat at `Pending` indefinitely. The worker *was*
 calling Sendflare correctly the whole time — the failure was downstream, which
 is why no amount of Zeabur reconfiguration helped.
 
-#### Outstanding: the worker still runs the fork image
+#### The fork image is retired
 
-The worker runs `ghcr.io/17old-org/openanalytics/worker:sendflare` (digest
-`sha256:73918f3e7c2884c3832f54a99dc988074866bc075631d81d45ffaddf81bb8cc7`,
-built from the v0.6.0 merge commit `4de9fc14`). That fork existed only to add
-Sendflare. Resend is upstream, so the worker should be moved back to
-`ghcr.io/openlabs-so/openanalytics/worker:v0.6.0` to match the other ten
-services and retire the fork image.
+The worker ran `ghcr.io/17old-org/openanalytics/worker:sendflare` only because
+upstream had no Sendflare transport. Resend is upstream, so on 2026-09-16 the
+worker was moved back to `ghcr.io/openlabs-so/openanalytics/worker:v0.6.0`.
+All eleven services now report the same build — `/health` on the api and the
+worker's own log lines both carry commit `673be05ab202b35cee4c17d89feb8c74264ef5d1`.
 
-Two things that were needed to make the fork image pullable, kept here because
-they will recur for any private-by-default GHCR package:
+Verified after the swap: `POST /api/auth/sign-in/magic-link` returned
+`{"status":true}` and the mail landed in the inbox (not spam) 25 seconds later.
+
+Two things that were needed to make the fork image pullable, kept because they
+will recur for any private-by-default GHCR package:
 
 1. The GHCR package `17old-org/openanalytics/worker` had to be public. It was
    private by default even though the repository is public; Zeabur cannot pull
@@ -70,6 +72,11 @@ they will recur for any private-by-default GHCR package:
 2. `17old-org` disabled public packages org-wide, so the org's
    **Settings -> Packages -> Package creation** had to allow `Public` before
    the package's own visibility could be changed.
+
+Zeabur warns that ten other services may depend on this one when the image
+changes; here the new tag is the tag they already run, so **Proceed Anyway**
+reduced drift rather than adding it. Zeabur redeploys on its own after the
+image is saved — no separate restart is needed.
 
 ## Decision recorded before a server is purchased
 
