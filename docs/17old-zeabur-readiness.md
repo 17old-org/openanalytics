@@ -14,32 +14,62 @@ Zeabur project `l7old-openanalytics` (`6a801ecebdeaa87e2c52507b`), environment
 `postgres:17-alpine`. Four hostnames are live: `app.`, `c.`, `rt.` and `api.`
 under `analytics.17-old.org`.
 
-### Sendflare is live (2026-09-16)
+### Mail runs on Resend (2026-09-16)
 
-The worker runs `ghcr.io/17old-org/openanalytics/worker:sendflare`, built by
-the manual `ci.yml` dispatch on `agent/zeabur-selfhost-setup` from the v0.6.0
-merge commit `4de9fc14`. Its digest is
-`sha256:73918f3e7c2884c3832f54a99dc988074866bc075631d81d45ffaddf81bb8cc7`.
+`RESEND_API_KEY` and `EMAIL_FROM=analytics@17-old.org` are set on the **worker
+only**, no Sendflare key and no SMTP block, so `selectEmailTransport` falls to
+its Resend branch. The worker confirms this at boot:
 
-Only `SENDFLARE_API_KEY` and `EMAIL_FROM` are set — no Resend key and no SMTP
-block — so `selectEmailTransport` takes its first branch and returns the
-Sendflare transport. It logs `email_transport_conflict` only when a second
-transport is also configured, so **silence in the logs is the correct signal
-here**, not a sign that the transport fell through.
+```json
+{"msg":"email_transport_selected","transport":"resend","source":"environment"}
+```
 
-Getting here needed two things that are easy to forget:
+`source: environment` is the part worth reading — it proves no relay is stored
+in Account -> Deployment. A stored relay drops the provider keys entirely
+(`...(stored ? {} : { sendflareApiKey, apiKey })`), so this line is the only
+cheap way to tell the two configurations apart.
+
+The sending domain `17-old.org` is verified in Resend (region
+`ap-northeast-1`). Its DNS lives beside the older Sendflare records without
+colliding, because the two providers use different names:
+
+| Provider | Records |
+| --- | --- |
+| Resend | `resend._domainkey` TXT, `rsend` CNAME, `send` CNAME |
+| Sendflare | `sendflare._domainkey` TXT, `mail` TXT + MX |
+
+Resend's own `send.` CNAME carries the return path, so no SPF TXT is needed at
+the apex and nothing had to be removed. The MX record Resend offers is for
+*receiving* only and was deliberately not added.
+
+End-to-end verified on 2026-09-16: a magic link to `leetanghui424@gmail.com`
+reached `Delivered` in the Resend log.
+
+#### Why Sendflare was abandoned
+
+Sendflare never verified `17-old.org` despite byte-correct DKIM, SPF, MX and
+DMARC records; the domain sat at `Pending` indefinitely. The worker *was*
+calling Sendflare correctly the whole time — the failure was downstream, which
+is why no amount of Zeabur reconfiguration helped.
+
+#### Outstanding: the worker still runs the fork image
+
+The worker runs `ghcr.io/17old-org/openanalytics/worker:sendflare` (digest
+`sha256:73918f3e7c2884c3832f54a99dc988074866bc075631d81d45ffaddf81bb8cc7`,
+built from the v0.6.0 merge commit `4de9fc14`). That fork existed only to add
+Sendflare. Resend is upstream, so the worker should be moved back to
+`ghcr.io/openlabs-so/openanalytics/worker:v0.6.0` to match the other ten
+services and retire the fork image.
+
+Two things that were needed to make the fork image pullable, kept here because
+they will recur for any private-by-default GHCR package:
 
 1. The GHCR package `17old-org/openanalytics/worker` had to be public. It was
-   private by default while the repository itself is public; Zeabur cannot pull
+   private by default even though the repository is public; Zeabur cannot pull
    a private package without registry credentials.
 2. `17old-org` disabled public packages org-wide, so the org's
-   **Settings → Packages → Package creation** had to allow `Public` before the
-   package's own visibility could be changed.
-
-Rollback: the previous worker build is tagged
-`5942a0c80c6e37cef9447b021646dc83da194dbb` in the same package; the upstream
-image `ghcr.io/openlabs-so/openanalytics/worker:v0.6.0` also still works but
-drops Sendflare.
+   **Settings -> Packages -> Package creation** had to allow `Public` before
+   the package's own visibility could be changed.
 
 ## Decision recorded before a server is purchased
 
