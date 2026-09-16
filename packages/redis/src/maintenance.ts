@@ -64,6 +64,29 @@ export function lastDeliveredIdFor(reply: unknown, groupName: string): string | 
   return null
 }
 
+/**
+ * One numeric field out of an `INFO` section reply.
+ *
+ * `INFO` is a text blob, not a typed reply: `# Memory\r\nused_memory:123\r\n…`.
+ * Parsed here rather than with `CONFIG GET` because `INFO memory` already
+ * carries both halves of the ratio, and `CONFIG` is the command a managed
+ * provider is most likely to have taken away.
+ *
+ * Anchored to the line start so `used_memory` cannot match `used_memory_rss`,
+ * `used_memory_peak` or the dozen other fields that share its prefix — the
+ * mistake a substring search makes silently, and with a plausible-looking
+ * number.
+ */
+export function infoFieldValue(info: string, field: string): number | null {
+  for (const line of info.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith(`${field}:`)) continue
+    const parsed = Number(trimmed.slice(field.length + 1))
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
 export interface QueueMaintenanceOptions {
   readonly client: Redis
   readonly streamKey?: string
@@ -157,6 +180,17 @@ export function createQueueMaintenance(options: QueueMaintenanceOptions): QueueM
       if (candidate === null) return null
       const at = streamIdTimestampMs(candidate)
       return at === null ? null : Math.max(0, now.getTime() - at)
+    },
+
+    async memoryUsageRatio(): Promise<number | null> {
+      const info = String((await client.call('INFO', 'memory')) ?? '')
+      const used = infoFieldValue(info, 'used_memory')
+      const max = infoFieldValue(info, 'maxmemory')
+
+      // `maxmemory: 0` is Valkey's "no limit", and there is no ratio to report
+      // against infinity. Null, not zero: see the interface docstring.
+      if (used === null || max === null || max <= 0) return null
+      return used / max
     },
   }
 }

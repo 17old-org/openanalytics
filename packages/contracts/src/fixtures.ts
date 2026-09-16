@@ -86,9 +86,35 @@ export const analyticsTimeseriesFixture: Schemas['AnalyticsTimeseriesResponse'] 
 export const analyticsPagesFixture: Schemas['AnalyticsPagesResponse'] = {
   meta: META,
   items: [
-    { page_path: '/', views: 18402, visitors: 9210 },
-    { page_path: '/pricing', views: 6120, visitors: 4890 },
-    { page_path: '/blog/launch', views: 3210, visitors: 2980 },
+    {
+      page_path: '/',
+      views: 18402,
+      visitors: 9210,
+      entrances: 7104,
+      exits: 3980,
+      bounces: 3120,
+      bounce_rate: 3120 / 7104,
+    },
+    {
+      page_path: '/pricing',
+      views: 6120,
+      visitors: 4890,
+      entrances: 1180,
+      exits: 2240,
+      bounces: 402,
+      bounce_rate: 402 / 1180,
+    },
+    // A path no session ever began on: `entrances` is a measured zero, so the
+    // rate has no denominator and is null rather than 0 (ADR-0075, D-E1).
+    {
+      page_path: '/blog/launch',
+      views: 3210,
+      visitors: 2980,
+      entrances: 0,
+      exits: 640,
+      bounces: 0,
+      bounce_rate: null,
+    },
   ],
 }
 

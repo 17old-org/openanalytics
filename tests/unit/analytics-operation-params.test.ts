@@ -91,9 +91,20 @@ describe('operation parameters resolve from the operation id alone', () => {
           }
           // `limit` is the one parameter the helper cannot know about, so it is
           // added exactly where the statement declares it.
-          const params = operation.sql.includes('{limit:UInt32}')
+          const withLimit = operation.sql.includes('{limit:UInt32}')
             ? { ...scoped, limit: 10 }
             : scoped
+          // The filtered family's subject IS its filter set (ADR-0075), and the
+          // set must be non-empty: these operations refuse an empty one on
+          // purpose, so that an unfiltered read cannot be routed down the raw
+          // path (D-F4). Every filtered statement binds every dimension, so one
+          // clause is enough to exercise the whole block.
+          const params = operation.id.startsWith('analytics.filtered_')
+            ? {
+                ...withLimit,
+                filters: [{ dimension: 'country', operator: 'eq', values: ['US'] }],
+              }
+            : withLimit
           const label = `${operation.id} tz=${timezone} import=${pointer === null ? 'none' : 'published'}`
           expect(() => operation.bindParams(params), label).not.toThrow()
         }

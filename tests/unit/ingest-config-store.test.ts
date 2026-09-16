@@ -221,14 +221,76 @@ describe('tracker config projection', () => {
     expect(await store.find('oa_pk_live')).toBeNull()
   })
 
-  it('serves a billing-blocked site, because configuration is not entitlement', async () => {
-    // The config endpoint is not the ingest gate. A blocked site's tracker still
-    // needs its redaction rules and privacy settings while it retries, and the
-    // ingest path is where SUBSCRIPTION_REQUIRED belongs.
+  // This block replaced "serves a billing-blocked site, because configuration
+  // is not entitlement". That test's premise — the tracker still needs its
+  // settings while it retries — was false twice over: the tracker never
+  // retries a 402, and a 200 config is exactly what kept a lapsed site's
+  // tracker knocking at full pageview rate for its whole suspension (ADR-0074
+  // amendment). Configuration now stops when admission stops.
+  // The facts arrive the way they do in production: through `decorate`, which
+  // is what attaches `cloud` to the cached entry on a miss.
+  const decorated = () =>
+    createIngestConfigStore({
+      db,
+      policy: POLICY,
+      decorate: (entry) => Promise.resolve({ ...entry, cloud: {} as never }),
+    })
+
+  it('keeps serving a suspended site while its grace window still admits events', async () => {
     resolveIngestConfig.mockResolvedValue(resolved({ status: 'suspended' }))
-    const store = createTrackerConfigStore(createIngestConfigStore({ db, policy: POLICY }))
+    const store = createTrackerConfigStore(decorated(), {
+      admitSuspended: () => ({ admitted: true }),
+    })
 
     const record = await store.find('oa_pk_live')
     expect(record?.siteId).toBe('site-1')
+  })
+
+  it('answers nothing for a suspended site whose grace is spent — the 404 that stands the tracker down', async () => {
+    resolveIngestConfig.mockResolvedValue(resolved({ status: 'suspended' }))
+    const store = createTrackerConfigStore(decorated(), {
+      admitSuspended: () => ({ admitted: false }),
+    })
+
+    expect(await store.find('oa_pk_live')).toBeNull()
+  })
+
+  it('stamps the paused light when the extension says the window is spent (ADR-0074 am. 2)', async () => {
+    resolveIngestConfig.mockResolvedValue(resolved())
+    const store = createTrackerConfigStore(decorated(), {
+      collectionPaused: () => Promise.resolve(true),
+    })
+
+    const record = await store.find('oa_pk_live')
+    expect(record?.config.collection_paused).toBe(true)
+  })
+
+  it('serves a byte-identical configuration while collecting — the field is absent, not false', async () => {
+    resolveIngestConfig.mockResolvedValue(resolved())
+    const store = createTrackerConfigStore(decorated(), {
+      collectionPaused: () => Promise.resolve(false),
+    })
+
+    const record = await store.find('oa_pk_live')
+    expect(record?.config).not.toHaveProperty('collection_paused')
+  })
+
+  it('a failing usage read serves as collecting — G-005, fail open', async () => {
+    resolveIngestConfig.mockResolvedValue(resolved())
+    const store = createTrackerConfigStore(decorated(), {
+      collectionPaused: () => Promise.reject(new Error('counter down')),
+    })
+
+    const record = await store.find('oa_pk_live')
+    expect(record?.config).not.toHaveProperty('collection_paused')
+  })
+
+  it('answers nothing for a suspended site with no hosted extension, matching the event path', async () => {
+    // Self-hosted: suspended events answer SITE_NOT_FOUND, so configuration
+    // answering 200 would be the two-endpoints-disagreeing state again.
+    resolveIngestConfig.mockResolvedValue(resolved({ status: 'suspended' }))
+    const store = createTrackerConfigStore(createIngestConfigStore({ db, policy: POLICY }))
+
+    expect(await store.find('oa_pk_live')).toBeNull()
   })
 })

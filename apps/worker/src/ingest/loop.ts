@@ -222,6 +222,26 @@ export function createIngestLoop(options: IngestLoopOptions): IngestLoop {
     } catch (err) {
       deps.logger.warn('queue_age_unavailable', { err, retryable: true })
     }
+
+    // Valkey's own capacity, read on the same tick and guarded the same way.
+    //
+    // A separate try/catch rather than a second statement inside the one above,
+    // because the two readings must not be able to cost each other: a queue-age
+    // failure that swallowed this would leave the one series in the system that
+    // sees a filling instance blind for the whole outage, and the reverse would
+    // silence G-006.
+    //
+    // Skipped rather than zero-filled when the read returns null. Null means
+    // `maxmemory` is unset and there is no ratio to publish; zero would be the
+    // healthiest reading this gauge has, published for the configuration where
+    // the failure mode is worst.
+    try {
+      const ratio = await deps.maintenance.memoryUsageRatio()
+      if (ratio !== null) deps.metrics.gauge(WORKER_METRICS.valkeyMemoryRatio, ratio)
+    } catch (err) {
+      deps.logger.warn('queue_memory_unavailable', { err, retryable: true })
+    }
+
     // Written even when the age could not be read: the tick still happened, and
     // liveness is the primary thing this row carries. An unknown age records as
     // 0 — the same convention the gauge uses for an empty queue — because the

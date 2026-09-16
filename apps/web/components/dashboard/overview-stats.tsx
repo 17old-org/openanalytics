@@ -15,9 +15,19 @@ import {
   ProvenanceChips,
 } from "@/components/dashboard/data-state";
 import { useAnalyticsInterval } from "@/components/dashboard/interval-context";
+import {
+  posterKey,
+  publishPosterRevenue,
+  publishPosterSessions,
+  publishPosterTotals,
+} from "@/components/dashboard/overview-poster-store";
 import { SquircleSurface } from "@/components/ui/squircle-card";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { useSiteAnalytics } from "@/components/dashboard/analytics-card";
+import {
+  FilteredRangePanel,
+  useAnalyticsFilters,
+} from "@/components/dashboard/filter-context";
 import {
   getAnalyticsOverview,
   getAnalyticsSessions,
@@ -69,6 +79,7 @@ export function OverviewStats() {
   const params = useParams<{ site: string }>();
   const slug = params.site ? decodeURIComponent(params.site) : "";
   const { range, rangePending } = useAnalyticsInterval();
+  const { active: filtersActive, filtersParam } = useAnalyticsFilters();
 
   const load = React.useCallback(
     async (signal: AbortSignal): Promise<AnalyticsOverviewResponse> => {
@@ -78,9 +89,12 @@ export function OverviewStats() {
         return new Promise<AnalyticsOverviewResponse>(() => {});
       }
       const { site_id } = await resolveSiteSlugCached(slug);
-      return getAnalyticsOverview(site_id, range, { signal });
+      return getAnalyticsOverview(site_id, range, {
+        signal,
+        ...(filtersParam !== undefined ? { filters: filtersParam } : {}),
+      });
     },
-    [slug, range, rangePending]
+    [slug, range, rangePending, filtersParam]
   );
 
   const overview = useApiResource(load);
@@ -102,7 +116,11 @@ export function OverviewStats() {
   if (LIVE_API && overview.status === "error") {
     return (
       <SquircleSurface className="border border-border shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
-        <ApiErrorPanel error={overview.error} onRetry={overview.retry} />
+        {overview.error.kind === "filtered_range" ? (
+          <FilteredRangePanel className="py-10" />
+        ) : (
+          <ApiErrorPanel error={overview.error} onRetry={overview.retry} />
+        )}
       </SquircleSurface>
     );
   }
@@ -158,28 +176,47 @@ export function OverviewStats() {
       display: data ? data.totals.pageviews.toLocaleString("en-US") : null,
       info: "Every page load. One visitor browsing five pages counts five times.",
     },
+    /* Under an active filter these two go dark on purpose. They ride the
+       sessions read, which does not take a filter in v1, so the number in
+       hand is the unfiltered site, and printing it beside filtered visitor
+       counts would present two populations as one row of facts. A dash is
+       not measured-zero here; it is "not measurable on this view". */
     {
       label: "Bounce rate",
-      display: sessionData
-        ? `${Math.round(sessionData.totals.bounce_rate * 100)}%`
-        : sessionsSettled
-          ? "—"
-          : null,
-      info: BOUNCE_INFO,
+      display: filtersActive
+        ? "–"
+        : sessionData
+          ? `${Math.round(sessionData.totals.bounce_rate * 100)}%`
+          : sessionsSettled
+            ? "–"
+            : null,
+      info: filtersActive ? FILTERED_SESSION_INFO : BOUNCE_INFO,
     },
     {
       label: "Avg. visit",
-      display: sessionData
-        ? durationLabel(sessionData.totals.avg_session_duration_ms)
-        : sessionsSettled
-          ? "—"
-          : null,
-      info: AVG_VISIT_INFO,
+      display: filtersActive
+        ? "–"
+        : sessionData
+          ? durationLabel(sessionData.totals.avg_session_duration_ms)
+          : sessionsSettled
+            ? "–"
+            : null,
+      info: filtersActive ? FILTERED_SESSION_INFO : AVG_VISIT_INFO,
     },
   ];
 
   return (
     <div className="flex flex-col gap-2">
+      {/* What this row shows, for the poster: the same totals, and the
+          bounce figure exactly as the tile would print it (null where the
+          tile shows a dash). */}
+      <PosterStatsPublisher
+        bounceRate={
+          filtersActive || !sessionData ? null : sessionData.totals.bounce_rate
+        }
+        data={data}
+        posterKey={posterKey(slug, range, filtersParam)}
+      />
       <StatGrid>
         {stats.map((stat) => (
           <StatCard key={stat.label} stat={stat} />
@@ -221,6 +258,19 @@ function RevenueCard({ slug }: { slug: string }) {
       ? (summary.data.meta.revenue?.connection_status ?? "not_connected")
       : null;
   const connected = totals !== null && status !== "not_connected";
+
+  // For the poster, once this tile has settled: the net figure it prints,
+  // or null where it shows the connect door. Keyed without filters, as the
+  // read itself is.
+  const { range } = useAnalyticsInterval();
+  const key = posterKey(slug, range);
+  const netMinor = connected && totals ? totals.net_minor : null;
+  const currency = connected && totals ? totals.currency : null;
+  React.useEffect(() => {
+    if (!settled) return;
+    publishPosterRevenue({ key, netMinor, currency });
+  }, [key, settled, netMinor, currency]);
+
   return (
     <SquircleSurface className="flex flex-col rounded-[24px] border border-border p-1 shadow-[0_1px_2px_rgba(0,0,0,0.06)] [--card-clip-radius:13px] sm:rounded-[30px] sm:[--card-clip-handle:2.5px] sm:[--card-clip-radius:17px]">
       <p className="flex items-center gap-1.5 pb-1.5 pl-3.5 pr-3 pt-1">
@@ -258,6 +308,10 @@ function RevenueCard({ slug }: { slug: string }) {
     </SquircleSurface>
   );
 }
+
+/** Why the two session tiles are dashes while a filter is on. */
+const FILTERED_SESSION_INFO =
+  "Session metrics cannot be filtered yet, so this tile pauses while filters are active rather than showing the whole site's number next to filtered ones.";
 
 export const BOUNCE_INFO =
   "The share of visits that left after a single page. Lower usually means the page delivered.";
@@ -389,4 +443,34 @@ export function StatCard({ stat }: { stat: Stat }) {
       </SquircleSurface>
     </SquircleSurface>
   );
+}
+
+/**
+ * Publishes the stat row's numbers to the overview poster store. Rendered
+ * inside the row's normal branch only, so an error panel or a stale empty
+ * publishes nothing and the Share button stays off for that range.
+ */
+function PosterStatsPublisher({
+  posterKey: key,
+  data,
+  bounceRate,
+}: {
+  posterKey: string;
+  data: AnalyticsOverviewResponse | null;
+  bounceRate: number | null;
+}) {
+  React.useEffect(() => {
+    if (!data) return;
+    const state = dataStateOf(data.meta, data.totals.events === 0);
+    publishPosterTotals({
+      key,
+      visitors: data.totals.visitors,
+      pageviews: data.totals.pageviews,
+      state: state.kind,
+    });
+  }, [key, data]);
+  React.useEffect(() => {
+    publishPosterSessions({ key, bounceRate });
+  }, [key, bounceRate]);
+  return null;
 }

@@ -162,6 +162,8 @@ const HINTS = {
     'Leave required. The first account is written verified — there is no mail to verify it with, which is why it exists — so the usual install never needs this. `optional` is the escape hatch for an install whose transport broke later.',
   RESEND_API_KEY:
     'Hosted email. Leave empty and set the SMTP block instead for a self-hosted install.',
+  SENDFLARE_API_KEY:
+    'Sendflare transactional email over HTTP. EMAIL_FROM must use a domain verified in Sendflare.',
   SMTP_HOST:
     'Set this and the magic link can be delivered — the whole of what a fresh install needs to let anyone in.',
   SMTP_SECURE:
@@ -179,8 +181,6 @@ const HINTS = {
     'Ed25519 pair with QUERY_SIGNING_PUBLIC_KEY. Generate: `openssl genpkey -algorithm ed25519`. Multi-line PEM cannot live in an env FILE — inject it through compose `environment:` or a secret manager.',
   REALTIME_TOKEN_SIGNING_KEY:
     'Signs realtime tokens; REALTIME_TOKEN_VERIFY_KEY is its verifying half on the realtime service.',
-  PREVIEW_TOKEN_SIGNING_KEY:
-    'Signs rule-preview tokens; PREVIEW_TOKEN_VERIFY_KEY is its verifying half on the collector.',
   GEOIP_DB_PATH:
     'A City-schema .mmdb (GeoLite2 or DB-IP). Unset means every event carries null geo — a degradation, never a failure.',
   OA_CREDENTIAL_KEYRING:
@@ -282,8 +282,9 @@ const SECTIONS = [
     blurb: [
       'The front door is a magic link, so a deployment with no transport here',
       'has no way for anyone to log in. Set the SMTP block for a self-hosted',
-      'install; RESEND_API_KEY is the hosted alternative and wins if both are',
-      'set. None of this is required to get in — the first-run screen at /login',
+      'install; Sendflare and Resend are HTTP alternatives. Sendflare wins if',
+      'more than one provider is configured. None of this is required to get in —',
+      'the first-run screen at /login',
       'creates an account with a password — and none of it has to be a file:',
       'the dashboard stores a relay too, and a stored one wins over everything',
       'here.',
@@ -297,6 +298,7 @@ const SECTIONS = [
       'SMTP_PASS',
       'SMTP_FROM',
       'RESEND_API_KEY',
+      'SENDFLARE_API_KEY',
     ],
   },
   {
@@ -334,8 +336,6 @@ const SECTIONS = [
       'QUERY_GATEWAY_TIMEOUT_MS',
       'REALTIME_TOKEN_SIGNING_KEY',
       'REALTIME_TOKEN_VERIFY_KEY',
-      'PREVIEW_TOKEN_SIGNING_KEY',
-      'PREVIEW_TOKEN_VERIFY_KEY',
     ],
   },
   {

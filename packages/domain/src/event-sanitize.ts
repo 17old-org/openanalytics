@@ -62,7 +62,23 @@ export const DEFAULT_REDACTED_QUERY_KEYS: readonly string[] = [
   'unsubscribe',
 ]
 
-/** Attribution parameters the server reads; never dropped by the default rule. */
+/**
+ * Attribution parameters the server reads; never dropped by the default rule.
+ *
+ * The click-id half of this list is widened by ADR-0075 D-C1 to the platforms
+ * whose landing URLs actually reach us. They are the same KIND of value as the
+ * three that were already here — a platform-minted, opaque, per-click id that
+ * says which paid placement a visit came from — so keeping one and dropping the
+ * next was an accident of when each platform was noticed rather than a rule.
+ *
+ * Being on this list only means the key survives the *drop* rule. The VALUE is
+ * still run through `redactSensitiveText`, and a click id is long, spaceless and
+ * mixed-alphabet, so it is stored as `[redacted]`. That is deliberate and stays
+ * (D-C2): the presence of the key is the whole of the signal D-C1 needs, and an
+ * exemption would be a permanent widening of a privacy rule bought against a
+ * hypothetical future conversion API. `clickIdSourceOf` in `./click-id.ts`
+ * therefore reads the key set and never the values.
+ */
 export const ATTRIBUTION_QUERY_KEYS: readonly string[] = [
   'utm_source',
   'utm_medium',
@@ -70,8 +86,14 @@ export const ATTRIBUTION_QUERY_KEYS: readonly string[] = [
   'utm_content',
   'utm_term',
   'gclid',
+  'gclsrc',
   'fbclid',
   'msclkid',
+  'twclid',
+  'ttclid',
+  'li_fat_id',
+  'igshid',
+  'yclid',
   'ref',
 ]
 

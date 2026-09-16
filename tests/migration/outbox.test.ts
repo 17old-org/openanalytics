@@ -7,6 +7,7 @@ import {
   markOutboxFailed,
   newId,
   readOutboxBacklog,
+  reclaimStalledOutbox,
   type Database,
 } from '@openanalytics/postgres'
 import { applyPostgresStreams } from '../support/postgres-streams.ts'
@@ -68,7 +69,8 @@ describeIfPostgres('outbox repository', () => {
       status: string
       attempts: number
       last_error: string | null
-    }>(`SELECT status, attempts, last_error FROM outbox WHERE idempotency_key = $1`, [
+      available_at: Date
+    }>(`SELECT status, attempts, last_error, available_at FROM outbox WHERE idempotency_key = $1`, [
       idempotencyKey,
     ])
     return result.rows[0]
@@ -151,6 +153,35 @@ describeIfPostgres('outbox repository', () => {
     }
   })
 
+  it('ends a permanent failure at failed, without spending the attempts it has left', async () => {
+    // `dead` and `failed` are not synonyms and the difference is who has to act.
+    // `dead` pages `critical` — five attempts spent against a system that should
+    // have worked, and a magic link inside one means a customer who cannot sign
+    // in. `failed` is a message that was never deliverable: a payload that does
+    // not parse, an address the provider refuses. Retrying either is arithmetic
+    // with a known answer, so a terminal failure ends on the first one.
+    await enqueueVerification('d@example.com', 'terminal-1')
+    const claimed = await claimDueOutbox(db, { topic: EMAIL_OUTBOX_TOPIC, limit: 10 })
+    const target = claimed.find((row) => {
+      const payload = row.payload as { to?: string }
+      return payload.to === 'd@example.com'
+    })
+    expect(target).toBeDefined()
+
+    if (target) {
+      const before = await statusOf('email.verification:terminal-1')
+      await markOutboxFailed(db, target.id, 'invalid', { terminal: true })
+      const after = await statusOf('email.verification:terminal-1')
+
+      // One attempt of a five-attempt budget, and it is already over.
+      expect(after).toMatchObject({ status: 'failed', attempts: 1, last_error: 'invalid' })
+      // `available_at` is left where it was rather than pushed a minute out:
+      // nothing will claim the row again, and moving the deadline would only
+      // misdate when it stopped.
+      expect(after?.available_at).toEqual(before?.available_at)
+    }
+  })
+
   it('drains every topic the generic dispatcher owns', async () => {
     // Before this, `site.ownership_changed` and its siblings had a producer and no
     // consumer: their rows sat `pending` for good, and an outbox nobody drains is a
@@ -218,13 +249,109 @@ describeIfPostgres('outbox repository', () => {
       (row) => row.topic === 'notification.rapid_burn' && row.status === 'pending',
     )
     expect(pending?.count).toBeGreaterThanOrEqual(1)
-    // Age is measured from `created_at`, not `available_at`: a row retried for an
-    // hour has an `available_at` in the future and would report a backlog of ~0
-    // while the side effect is still owed.
-    expect(pending?.oldestAgeMs).toBeGreaterThanOrEqual(0)
+    // Measured from `available_at`, so the number is LATENESS and not age. The
+    // row above was made due a minute ago and is therefore a minute late.
+    expect(pending?.oldestAgeMs).toBeGreaterThanOrEqual(60_000)
 
     const dead = rows.find((row) => row.topic === EMAIL_OUTBOX_TOPIC && row.status === 'dead')
     expect(dead?.count).toBeGreaterThanOrEqual(1)
-    expect(dead?.oldestAgeMs).toBeGreaterThanOrEqual(0)
+    // Only the COUNT is meaningful for `dead`, and only the count is alerted on
+    // (`oa-email-outbox-dead`). `markOutboxFailed` writes `available_at =
+    // now() + retryDelay` on the same statement that buries the row, so a dead
+    // row's lateness reads about a minute in the future — a retry slot that will
+    // never be used. Asserted so nobody later builds an age rule on this series
+    // believing it measures how long the row has been dead.
+    expect(dead?.oldestAgeMs).toBeLessThan(0)
+  })
+
+  it('does not count a row scheduled for the future as a backlog', async () => {
+    // The 2026-08-23 false alarm, as a test. A trial reminder written today and
+    // due tomorrow raised `oa-email-outbox-stalled` from the moment it was
+    // enqueued, because the gauge measured how OLD the row was rather than how
+    // LATE it was, and then resolved itself when its due time arrived. An alert
+    // that fires because a scheduled thing is scheduled gets closed unread.
+    await enqueueOutbox(db, {
+      topic: 'notification.scheduled_probe',
+      idempotencyKey: 'scheduled_probe:1',
+      payload: { site_id: 'scheduled' },
+      availableAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    })
+
+    const rows = await readOutboxBacklog(db)
+    const row = rows.find((entry) => entry.topic === 'notification.scheduled_probe')
+
+    expect(row?.count).toBe(1)
+    // Negative: it is not late, it is early. Every alert on this gauge is a
+    // `gt` threshold, so a row that is not yet due cannot trip any of them.
+    expect(row?.oldestAgeMs).toBeLessThan(0)
+  })
+
+  describe('reclaiming rows abandoned in processing', () => {
+    /**
+     * Claims a row and then abandons it, as a worker that died mid-delivery
+     * does.
+     *
+     * The topic is per-case rather than shared, and that is not tidiness:
+     * `claimDueOutbox` takes every due row of a topic, so a row one case left
+     * `pending` gets claimed by the next case's setup and counted in its
+     * reclaim. The first version of this suite failed exactly that way.
+     */
+    const abandon = async (topic: string, idempotencyKey: string, dueSecondsAgo: number) => {
+      await enqueueOutbox(db, {
+        topic,
+        idempotencyKey,
+        payload: { probe: idempotencyKey },
+        availableAt: new Date(Date.now() - dueSecondsAgo * 1000),
+      })
+      await claimDueOutbox(db, { topic, limit: 10 })
+    }
+
+    it('returns a row whose worker died to pending, and leaves a fresh claim alone', async () => {
+      // Two rows, one claim: the difference is only how long ago each fell due,
+      // which is what the lease reads.
+      await abandon('notification.reclaim_a', 'reclaim:stale', 600)
+      await abandon('notification.reclaim_a', 'reclaim:fresh', 0)
+
+      const reclaimed = await reclaimStalledOutbox(db, { staleAfterSeconds: 300 })
+
+      expect(reclaimed).toBe(1)
+      // Table-wide, not per-topic, on purpose: every drain in the process has
+      // the same defect, including the two the dispatcher does not own.
+      expect(await statusOf('reclaim:stale')).toMatchObject({ status: 'pending' })
+      // Still `processing`. A worker taking four minutes is slow, not dead, and
+      // reclaiming from it is how one delivery becomes two.
+      expect(await statusOf('reclaim:fresh')).toMatchObject({ status: 'processing' })
+    })
+
+    it('buries a row that has exhausted its attempts instead of looping on it', async () => {
+      await abandon('notification.reclaim_b', 'reclaim:exhausted', 600)
+
+      // The dangerous shape: a payload that kills the worker every time it is
+      // claimed would be reclaimed, kill it again, and be reclaimed — a crash
+      // loop built out of the crash-recovery mechanism. `dead` is terminal and
+      // is alerted on by count.
+      const reclaimed = await reclaimStalledOutbox(db, {
+        staleAfterSeconds: 300,
+        maxAttempts: 1,
+      })
+
+      expect(reclaimed).toBe(1)
+      expect(await statusOf('reclaim:exhausted')).toMatchObject({ status: 'dead' })
+    })
+
+    it('leaves no row in processing for a claim older than the lease', async () => {
+      // The invariant, stated directly: whatever else it does, the sweep must
+      // never leave behind a `processing` row that nothing will touch again.
+      // Five such rows survived two days and every alert in production.
+      await abandon('notification.reclaim_c', 'reclaim:invariant', 600)
+
+      await reclaimStalledOutbox(db, { staleAfterSeconds: 300, maxAttempts: 1 })
+
+      const stuck = await pool.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM outbox
+          WHERE status = 'processing' AND available_at < now() - interval '300 seconds'`,
+      )
+      expect(stuck.rows[0]?.n).toBe('0')
+    })
   })
 })

@@ -26,13 +26,23 @@ export interface RevenueProviderDescriptor {
 /**
  * The catalog, in the order the picker should show it: what works first.
  *
- * Stripe is the launch provider (F-303, closed by ADR-0033 D1). The other five
- * are the recorded follow-ups behind the same descriptor/adapter framework — the
- * second provider is an adapter and a catalog flip, not an architecture.
+ * Stripe is the launch provider (F-303, closed by ADR-0033 D1). **Polar is the
+ * second, and it arrived as the ADR promised**: an adapter, plus this line
+ * changing from `false` to `true`. No migration, no environment variable, no
+ * OpenAPI change, no new grant — the provider column was free text by design
+ * (`0026_revenue_credentials.sql`) and the framework was the whole point.
+ *
+ * It was not entirely free. Polar's signature spans three headers and its event
+ * body carries no id, which cost the webhook route the provider→header-name map
+ * it used to keep — a refactor D4's own comment had already named. That is the
+ * boundary this catalog is really testing: a second provider may cost the
+ * *transport* a generalization, and must cost the architecture nothing.
+ *
+ * The remaining four are recorded follow-ups behind the same framework.
  */
 export const REVENUE_PROVIDERS: readonly RevenueProviderDescriptor[] = [
   { id: 'stripe', displayName: 'Stripe', available: true },
-  { id: 'polar', displayName: 'Polar', available: false },
+  { id: 'polar', displayName: 'Polar', available: true },
   { id: 'paddle', displayName: 'Paddle', available: false },
   { id: 'lemonsqueezy', displayName: 'Lemon Squeezy', available: false },
   { id: 'creem', displayName: 'Creem', available: false },

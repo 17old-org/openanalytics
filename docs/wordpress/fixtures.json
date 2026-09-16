@@ -121,7 +121,11 @@
           {
             "page_path": "/pricing",
             "views": 310,
-            "visitors": 260
+            "visitors": 260,
+            "entrances": 120,
+            "exits": 95,
+            "bounces": 48,
+            "bounce_rate": 0.4
           }
         ]
       }

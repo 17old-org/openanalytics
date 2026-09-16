@@ -23,14 +23,15 @@ import { describe, expect, it } from 'vitest'
  */
 
 describe('import provider catalog', () => {
-  it('offers Plausible and only Plausible in this build', () => {
-    // D11's scope cut: the adapter framework plus Plausible complete. Anything
-    // else marked available would promise a parser that does not exist.
+  it('offers Plausible and Umami in this build, and nothing else', () => {
+    // D11's scope cut plus the Umami follow-up. Anything else marked available
+    // would promise a parser that does not exist, and the worker's registry is
+    // the other half of this pair — the two must ship together.
     const available = IMPORT_PROVIDERS.filter((provider) => provider.available)
-    expect(available.map((provider) => provider.id)).toEqual(['plausible'])
+    expect(available.map((provider) => provider.id)).toEqual(['plausible', 'umami'])
   })
 
-  it('lists the five follow-up providers rather than hiding them', () => {
+  it('lists the four follow-up providers rather than hiding them', () => {
     // "Supported later" and "not something we do" are different answers, and a
     // catalog carrying only working adapters could give only the second.
     expect(IMPORT_PROVIDERS.map((provider) => provider.id)).toEqual([
@@ -43,12 +44,18 @@ describe('import provider catalog', () => {
     ])
   })
 
-  it('records Plausible as aggregate-only, which is what forces the read design', () => {
+  it('records what each provider’s export is, which is what the read design turns on', () => {
     // The whole D2/D4/D5 apparatus — no fake visitor ids, a cutover, widened
-    // `accuracy` — exists because this value is `aggregate_only`. If it ever
-    // read `event_level` the pipeline would be entitled to assumptions the
+    // `accuracy` — exists because Plausible's export is `aggregate_only`. If that
+    // ever read `event_level` the pipeline would be entitled to assumptions the
     // provider's export cannot support.
     expect(findImportProvider('plausible')?.capability).toBe('aggregate_only')
+    // Umami's export *is* event-level, and the field says so because it
+    // describes the customer's file rather than what is done with it: the
+    // adapter aggregates those events to the same daily grain, into the same
+    // staged tables, read the same way. An `event_level` capability is never a
+    // promise of finer-grained reporting.
+    expect(findImportProvider('umami')?.capability).toBe('event_level')
   })
 
   it('gives every descriptor a display name and a stable id', () => {

@@ -79,6 +79,8 @@ function buildDeps(overrides: Partial<IngestDeps>): IngestDeps {
       trimAcked: () => Promise.resolve({ trimmed: 0, minId: '0-0' }),
       // An empty queue: the case where nothing at all happened this tick.
       oldestPendingAgeMs: () => Promise.resolve(null),
+      // An instance with no `maxmemory`: the gauge is skipped, not zero-filled.
+      memoryUsageRatio: () => Promise.resolve(null),
     },
     clickhouse: {
       insertEvents: () => Promise.reject(new Error('unused')),
@@ -138,6 +140,7 @@ describe('ingest loop pipeline heartbeat', () => {
         publishDeadLetter: () => Promise.resolve(0),
         trimAcked: () => Promise.resolve({ trimmed: 0, minId: '0-0' }),
         oldestPendingAgeMs: () => Promise.resolve(90_000),
+        memoryUsageRatio: () => Promise.resolve(null),
       } as unknown as IngestDeps['maintenance'],
     })
 

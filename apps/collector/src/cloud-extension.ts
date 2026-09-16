@@ -75,6 +75,20 @@ export interface CollectorCloudExtension {
     readonly now: Date
   }) => IngestAdmission
   /**
+   * Whether the site's plan window is spent, for the tracker-config response
+   * (ADR-0074, amendment 2). The same `decideQuota` reading the event gate
+   * enforces, asked with a weight-0 batch — so the config's "paused" light and
+   * the gate's refusals cannot disagree. Optional: an extension without it
+   * simply never pauses a tracker, and a read failure answers `false` — the
+   * G-005 direction, since a wrongly-paused tracker loses data and a wrongly
+   * -active one only knocks.
+   */
+  readonly collectionPaused?: (input: {
+    readonly config: SiteIngestConfig
+    readonly facts: CloudIngestFacts
+    readonly now: Date
+  }) => Promise<boolean>
+  /**
    * The quota gate (D-103), before anything is enqueued. Throws
    * `QUOTA_EXCEEDED` when the window and its buffer are spent; otherwise returns
    * the window this batch bills into, or `null` for a site that has none.

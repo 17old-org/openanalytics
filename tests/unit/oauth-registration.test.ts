@@ -61,7 +61,7 @@ describe('validateClientRegistration', () => {
     })
   })
 
-  describe('redirect URIs: https or loopback, never a wildcard (D3)', () => {
+  describe('redirect URIs: https, loopback or a native scheme, never a wildcard (D3)', () => {
     it.each([
       ['https on any host', 'https://example.com/callback', true],
       ['https with a port and query', 'https://example.com:8443/cb?state=1', true],
@@ -74,8 +74,18 @@ describe('validateClientRegistration', () => {
       ['a wildcard in the host', 'https://*.example.com/callback', false],
       ['a wildcard in the path', 'https://example.com/*', false],
       ['a fragment', 'https://example.com/callback#fragment', false],
-      ['a custom scheme (deferred, not refused forever)', 'cursor://callback', false],
+      // The ADR-0047 D3 widening, made 2026-08-28 for native MCP clients:
+      // a private-use scheme is accepted in authority form, PKCE being what
+      // keeps a scheme squatter from finishing the exchange.
+      [
+        'a native app scheme in authority form',
+        'cursor://anysphere.cursor-mcp/oauth/callback',
+        true,
+      ],
+      ['another private-use scheme', 'myapp://oauth/callback', true],
+      ['a custom scheme without the // authority', 'cursor:callback', false],
       ['a javascript scheme', 'javascript:alert(1)', false],
+      ['a data scheme', 'data:text/html,x', false],
       ['a relative URL', '/callback', false],
     ])('%s → accepted=%s', (_name, uri, accepted) => {
       const result = judge({ ...valid(), redirect_uris: [uri] })

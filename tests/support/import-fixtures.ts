@@ -310,6 +310,328 @@ export function buildPlausibleZip(
   return buildZip(members)
 }
 
+// --- A realistic Umami Cloud export ------------------------------------------
+
+/**
+ * The `website_event.csv` column order of a real Umami Cloud export, verified
+ * 2026-08-26 against one taken from the product.
+ *
+ * The adapter addresses every column **by name**, so this order is here for the
+ * fixture rather than for the parser — which is precisely what a reordered-header
+ * test then proves.
+ */
+export const UMAMI_COLUMNS = [
+  'website_id',
+  'session_id',
+  'visit_id',
+  'event_id',
+  'hostname',
+  'browser',
+  'os',
+  'device',
+  'screen',
+  'language',
+  'country',
+  'region',
+  'city',
+  'url_path',
+  'url_query',
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_content',
+  'utm_term',
+  'referrer_path',
+  'referrer_query',
+  'referrer_domain',
+  'page_title',
+  'gclid',
+  'fbclid',
+  'msclkid',
+  'ttclid',
+  'li_fat_id',
+  'twclid',
+  'lcp',
+  'inp',
+  'cls',
+  'fcp',
+  'ttfb',
+  'event_type',
+  'event_name',
+  'tag',
+  'distinct_id',
+  'created_at',
+  'job_id',
+] as const
+
+export type UmamiColumn = (typeof UMAMI_COLUMNS)[number]
+
+/** The columns a Cloud export renders as an **unquoted** `\N` when null, plus
+ * `event_type`, which it renders as an unquoted integer. Everything else is
+ * always double-quoted, the empty string included. */
+const UMAMI_UNQUOTED: ReadonlySet<string> = new Set([
+  'lcp',
+  'inp',
+  'cls',
+  'fcp',
+  'ttfb',
+  'job_id',
+  'event_type',
+])
+
+/** Invented, in the confirmed shape. A real export's identifiers are a
+ * customer's data and none of them are in this repository. */
+const UMAMI_WEBSITE = '00000000-0000-4000-8000-0000000000aa'
+
+export type UmamiEvent = Partial<Record<UmamiColumn, string>>
+
+/**
+ * One row in the provider's dialect: every string field double-quoted, the
+ * nullable numerics an unquoted `\N`, `event_type` an unquoted integer.
+ *
+ * Values are written verbatim — a fixture needing a doubled quote or a literal
+ * newline writes one — because the point of these rows is to meet the reader the
+ * way the provider does, not the way a helper would prefer.
+ */
+export function umamiRow(event: UmamiEvent): string {
+  return UMAMI_COLUMNS.map((column) => {
+    const value = event[column]
+    if (UMAMI_UNQUOTED.has(column)) {
+      if (value !== undefined) return value
+      return column === 'event_type' ? '1' : '\\N'
+    }
+    return `"${value ?? ''}"`
+  }).join(',')
+}
+
+/** Header plus rows, LF-terminated with a trailing newline — the dialect the
+ * sample export uses (UTF-8, no BOM, LF only). */
+export function umamiCsv(rows: readonly string[]): string {
+  const header = UMAMI_COLUMNS.map((column) => `"${column}"`).join(',')
+  return [header, ...rows, ''].join('\n')
+}
+
+const S1 = '10000000-0000-4000-8000-000000000001'
+const S2 = '10000000-0000-4000-8000-000000000002'
+const S3 = '10000000-0000-4000-8000-000000000003'
+const V1 = '20000000-0000-4000-8000-000000000001'
+const V2 = '20000000-0000-4000-8000-000000000002'
+const V3 = '20000000-0000-4000-8000-000000000003'
+const V4 = '20000000-0000-4000-8000-000000000004'
+
+/** The one row the fixture repeats, verbatim, out of place, later in the file. */
+const UMAMI_REPEATED_ROW = umamiRow({
+  website_id: UMAMI_WEBSITE,
+  session_id: S1,
+  visit_id: V1,
+  event_id: '30000000-0000-4000-8000-000000000002',
+  hostname: 'shop.example.com',
+  browser: 'chrome',
+  os: 'Windows 10',
+  device: 'desktop',
+  screen: '1920x1080',
+  language: 'en-GB',
+  country: 'GB',
+  region: 'GB-ENG',
+  city: 'London',
+  url_path: '/pricing',
+  referrer_domain: 'www.example.net',
+  page_title: 'Pricing',
+  created_at: '2026-03-01 10:00:30',
+})
+
+/**
+ * Two days of events, deliberately awkward in every way the adapter claims to
+ * tolerate.
+ *
+ * Written so that every staged number is hand-checkable from the rows, and so
+ * that each load-bearing decision has something to bite on:
+ *
+ * - **unsorted** — the second day is written first, so a parser that assumed a
+ *   date-ordered file would close a day that is not finished;
+ * - **a duplicate `event_id`**, out of place, which must be counted and dropped;
+ * - **a `page_title` containing a newline**, which the pipeline hands over as two
+ *   lines and the adapter must stitch back into one record;
+ * - **a custom event alone in its visit** on the second day, which is excluded
+ *   from visits, bounces and duration and whose dimensions must not fabricate an
+ *   all-zero row on four breakdowns;
+ * - **a performance row** (`event_type` 5), which changes no measure;
+ * - **a quoted comma** in a UTM campaign, which a `split(',')` would shear;
+ * - **`XX`**, the unresolved-country placeholder, which must not become a nation.
+ *
+ * The daily totals it implies, which are Umami's own definitions:
+ *
+ * | day        | pageviews | visitors | visits | bounces | duration |
+ * | ---------- | --------- | -------- | ------ | ------- | -------- |
+ * | 2026-03-01 | 3         | 2        | 2      | 1       | 30       |
+ * | 2026-03-02 | 2         | 1        | 1      | 0       | 20       |
+ */
+export const UMAMI_EVENT_ROWS: readonly string[] = [
+  // --- the second day, written first ---
+  umamiRow({
+    website_id: UMAMI_WEBSITE,
+    session_id: S3,
+    visit_id: V3,
+    event_id: '30000000-0000-4000-8000-000000000005',
+    hostname: 'docs.example.com',
+    browser: 'crios',
+    os: 'Mac OS',
+    device: 'tablet',
+    screen: '820x1180',
+    language: 'de',
+    // The placeholder some platforms send for an address they could not resolve.
+    country: 'XX',
+    url_path: '/',
+    page_title: 'Docs',
+    created_at: '2026-03-02 09:00:00',
+  }),
+  umamiRow({
+    website_id: UMAMI_WEBSITE,
+    session_id: S3,
+    visit_id: V3,
+    event_id: '30000000-0000-4000-8000-000000000006',
+    hostname: 'docs.example.com',
+    browser: 'crios',
+    os: 'Mac OS',
+    device: 'tablet',
+    country: 'XX',
+    url_path: '/',
+    lcp: '1200',
+    ttfb: '80',
+    event_type: '5',
+    created_at: '2026-03-02 09:00:10',
+  }),
+  umamiRow({
+    website_id: UMAMI_WEBSITE,
+    session_id: S3,
+    visit_id: V3,
+    event_id: '30000000-0000-4000-8000-000000000007',
+    hostname: 'docs.example.com',
+    browser: 'crios',
+    os: 'Mac OS',
+    device: 'tablet',
+    country: 'XX',
+    url_path: '/',
+    page_title: 'Docs',
+    created_at: '2026-03-02 09:00:20',
+  }),
+  umamiRow({
+    website_id: UMAMI_WEBSITE,
+    session_id: S1,
+    visit_id: V4,
+    event_id: '30000000-0000-4000-8000-000000000008',
+    hostname: 'shop.example.com',
+    browser: 'chrome',
+    os: 'Windows 10',
+    device: 'desktop',
+    country: 'GB',
+    region: 'GB-ENG',
+    url_path: '/',
+    event_type: '2',
+    event_name: 'Signup',
+    created_at: '2026-03-02 23:59:00',
+  }),
+
+  // --- the first day ---
+  umamiRow({
+    website_id: UMAMI_WEBSITE,
+    session_id: S1,
+    visit_id: V1,
+    event_id: '30000000-0000-4000-8000-000000000001',
+    hostname: 'shop.example.com',
+    browser: 'chrome',
+    os: 'Windows 10',
+    device: 'desktop',
+    screen: '1920x1080',
+    language: 'en-GB',
+    country: 'GB',
+    region: 'GB-ENG',
+    city: 'London',
+    url_path: '/',
+    referrer_domain: 'www.example.net',
+    // A literal newline inside a quoted field. Umami never strips one: the
+    // tracker sends `document.title` verbatim and the server truncates at 500
+    // characters and nothing else.
+    page_title: 'Home\nand away',
+    created_at: '2026-03-01 10:00:00',
+  }),
+  UMAMI_REPEATED_ROW,
+  umamiRow({
+    website_id: UMAMI_WEBSITE,
+    session_id: S1,
+    visit_id: V1,
+    event_id: '30000000-0000-4000-8000-000000000003',
+    hostname: 'shop.example.com',
+    browser: 'chrome',
+    os: 'Windows 10',
+    device: 'desktop',
+    country: 'GB',
+    region: 'GB-ENG',
+    city: 'London',
+    url_path: '/pricing',
+    referrer_domain: 'www.example.net',
+    event_type: '2',
+    event_name: 'Signup',
+    created_at: '2026-03-01 10:01:00',
+  }),
+  umamiRow({
+    website_id: UMAMI_WEBSITE,
+    session_id: S2,
+    visit_id: V2,
+    event_id: '30000000-0000-4000-8000-000000000004',
+    hostname: 'shop.example.com',
+    browser: 'ios',
+    os: 'iOS',
+    device: 'mobile',
+    screen: '390x844',
+    language: 'de-DE',
+    country: 'DE',
+    region: 'DE-BE',
+    city: 'Berlin',
+    url_path: '/',
+    utm_source: 'newsletter',
+    utm_medium: 'email',
+    // A campaign name with a comma. Unquoted this row would parse as forty-two
+    // cells and shift every later value one place left.
+    utm_campaign: 'spring, 2026',
+    page_title: 'Home',
+    created_at: '2026-03-01 11:00:00',
+  }),
+
+  // The repeat, out of place — nothing promises an export is ordered.
+  UMAMI_REPEATED_ROW,
+]
+
+export const UMAMI_EVENT_CSV = umamiCsv(UMAMI_EVENT_ROWS)
+
+/** The two property-bag files a Cloud export ships beside the event table.
+ * Header-only, which is what they are for a site that recorded no such data. */
+export const UMAMI_SESSION_DATA_CSV = '"website_id","session_id","data_key","string_value"\n'
+export const UMAMI_EVENT_DATA_CSV = '"website_id","event_id","data_key","string_value"\n'
+
+/** The whole export as a real ZIP, in the container the product delivers: three
+ * entries at the archive root. */
+export function buildUmamiZip(
+  options: {
+    eventCsv?: string
+    /** Drop `session_data.csv` and `event_data.csv`, which a customer who
+     * repacked the export by hand plausibly would. */
+    omitDropped?: boolean
+    extra?: readonly ZipMember[]
+  } = {},
+): Buffer {
+  const members: ZipMember[] = [
+    { name: 'website_event.csv', content: options.eventCsv ?? UMAMI_EVENT_CSV },
+  ]
+  if (options.omitDropped !== true) {
+    members.push(
+      { name: 'session_data.csv', content: UMAMI_SESSION_DATA_CSV },
+      { name: 'event_data.csv', content: UMAMI_EVENT_DATA_CSV },
+    )
+  }
+  return buildZip([...members, ...(options.extra ?? [])])
+}
+
 // --- The `test_fixture` adapter ----------------------------------------------
 
 export const TEST_FIXTURE_PROVIDER = 'test_fixture'

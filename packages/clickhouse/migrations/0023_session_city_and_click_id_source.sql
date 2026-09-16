@@ -1,0 +1,160 @@
+-- Two additive columns that ship together because they are the two halves of one
+-- read (ADR-0075): a session-grain filter needs `city` on the session fact, and
+-- an inferred acquisition source needs to be visible as inferred on the raw
+-- event. Lane 0 and lane B of the same work order, one migration, applied before
+-- either service is deployed.
+--
+-- Rollout note: expand-only. Two `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` on
+-- existing tables. No backfill, no rewrite of stored rows, and no
+-- `CREATE MATERIALIZED VIEW` anywhere in this file. 0017 is the precedent for
+-- both the shape and the reasoning below, and its rollout note is the one to
+-- read beside this one.
+--
+-- Remember the directory rule while reading the prose: NO SEMICOLON MAY APPEAR
+-- INSIDE A COMMENT, because the runner splits on the semicolon before it strips
+-- comments.
+--
+-- ============================================================================
+-- PART A -- `session_facts_versions.city`
+-- ============================================================================
+--
+-- The fact table has carried `country` since 0013 and has never carried `city`,
+-- even though `events_raw` carries both and the sessionizer already reads the
+-- country out of it. That asymmetry was invisible while the fact table only fed
+-- session totals and revenue touchpoints. It stops being invisible the moment a
+-- dashboard filter is session-scoped (ADR-0075, D-F1): `city` is one of the four
+-- dimensions v1 ships, and a filter dimension the fact table does not carry
+-- cannot be answered from the fact table at all.
+--
+-- It is added HERE, in the same migration as part B, rather than later, because
+-- a filter dimension bolted on after the read path exists costs a second
+-- ClickHouse migration and a second worker deploy for a column that is ten lines
+-- of plumbing today.
+--
+-- THE EMPTY-STRING RULE, and why this does not re-version every session.
+--
+-- The argument is 0017's, unchanged, and it holds for the same reason: ClickHouse
+-- gives an added column its type default in every part written before the ALTER,
+-- so a pre-extension row reads back as `city = ''`, and `''` is exactly the value
+-- `sessionize` already normalizes an absent city to. So the finalizer's
+-- change-detection fingerprint (`apps/worker/src/sessions/plan.ts`) compares
+-- EQUAL for a stored session whose entry event had no resolvable city, and
+-- UNEQUAL only for one that did -- which is a row that is genuinely missing data
+-- and should get a new version. Had the column been `Nullable`, every stored
+-- session would have compared unequal and the first pass after this migration
+-- would have rewritten the whole table.
+--
+-- The blast radius is 0017's figure, unchanged: the finalizer never recomputes
+-- below a site's `finalized_through`, which cannot fall further behind than the
+-- session cap plus inactivity plus lateness, about 48.5 hours. Everything older
+-- is never read again. And `planRollupSwap` compares only session/engaged/
+-- bounced counts, pageviews and the two duration sums, none of which a city can
+-- move, so the rollup buckets recompute, compare equal and are not written --
+-- `session_rollups_1h`/`_1d` gain no generation from this migration.
+--
+-- WHAT THIS MEANS FOR A HISTORICAL READ, stated here because it is the one thing
+-- a reader will mistake for a bug: `city` is empty for every session that
+-- finalized before this migration, and there is no backfill (D-C3's rule applied
+-- to the fact table as well). A city-filtered range that reaches into that
+-- history returns fewer sessions than the unfiltered geography report suggests,
+-- and that is the honest answer rather than a defect.
+--
+-- ON THE COLUMN TYPE, because it deliberately differs from 0009. There, `city` is
+-- a plain `String` and the file says why: it is unbounded, and it is part of the
+-- rollup's ORDER BY, where a dictionary buys nothing a sorted column has not
+-- already bought. Here the column exists to be an equality PREDICATE on a wide
+-- fact table -- `city IN (...)` inside the filter subquery -- and that is the one
+-- access pattern `LowCardinality` is actually for, because the comparison happens
+-- against dictionary positions rather than against strings. It mirrors `country`
+-- beside it, which is the column it is read next to in every statement that
+-- touches it.
+
+ALTER TABLE session_facts_versions
+  ADD COLUMN IF NOT EXISTS city LowCardinality(String);
+
+-- ============================================================================
+-- PART A2 -- `session_facts_versions.session_hints`
+-- ============================================================================
+--
+-- The column a session-scoped filter cannot be correct without, and it is here
+-- because production said so rather than because the design asked for it.
+--
+-- A filtered read selects sessions on the fact table and then counts THOSE
+-- SESSIONS' EVENTS in `events_raw`, so it needs a key that joins the two.
+-- `events_raw.session_id` is the site-scoped HMAC of the client's per-tab hint,
+-- and the fact table stores a hint in `session_hint` -- but only ONE, the entry
+-- event's. The sessionizer partitions by resolved identity and not by hint,
+-- deliberately (its own header: two tabs of one anonymous visitor are one
+-- session), so a session that spans two tabs owns two hints and remembers one.
+--
+-- Measured on production, 14 days, 101,133 page views:
+--
+--   * 83,107 (82.2%) joined to a fact by the entry hint,
+--   * 100,310 (99.2%) had a fact under the same (site, anonymous_id).
+--
+-- So roughly one page view in six belongs to a session the entry hint cannot
+-- find, and a filtered report built on that join would have undercounted by that
+-- much -- silently, and in the direction that makes a customer's best channel
+-- look worse than it is.
+--
+-- `Array(String)` of every hint the session carried, so the join is
+-- `arrayJoin(session_hints)`. The alternative -- joining on
+-- (anonymous_id, session_start..session_end) -- is a range join over the raw
+-- table, which is exactly the cost this layer exists to avoid.
+--
+-- ON RE-VERSIONING, which this column does cause and the other two do not. An
+-- added `Array(String)` reads back as `[]` in every part written before the
+-- ALTER, and a recompute produces the real hint list, so a stored fact for a
+-- session that carried any hint compares UNEQUAL and gets a new version. That is
+-- 0017's rule working as written -- a row that is genuinely missing data should
+-- be re-versioned -- and it is bounded by the same watermark: the finalizer only
+-- recomputes at or after `finalized_through`, which cannot lag further than the
+-- session cap (24h) plus inactivity (30 min) plus lateness (24h), about 48.5
+-- hours. Everything older is never read again, so it keeps `[]` and stays
+-- unjoinable by a filtered read. The frontend note and the ADR both say so: a
+-- filtered range reaching before the deploy answers from less than the whole.
+--
+-- The rollup swap writes zero rows for those re-versions, because
+-- `aggregatesEqual` looks only at session/engaged/bounced counts, pageviews and
+-- the two duration sums, and a hint list moves none of them.
+
+ALTER TABLE session_facts_versions
+  ADD COLUMN IF NOT EXISTS session_hints Array(String);
+
+-- ============================================================================
+-- PART B -- `events_raw.click_id_source`
+-- ============================================================================
+--
+-- ADR-0075, D-C1. When a visitor arrives from a paid placement the browser
+-- usually sends no referrer at all -- the ad platform's own interstitial is
+-- cross-origin and modern browsers strip the path or the whole header -- so the
+-- visit is stored with `referrer_domain = ''` and the Sources report calls it
+-- Direct. The landing URL still carries the platform's click id, and D-C1 uses
+-- that at INGEST to fill `referrer_domain` with the platform's canonical host.
+--
+-- This column records that the value was DERIVED rather than reported, and it is
+-- not a duplicate of `referrer_domain`:
+--
+--   * it is how "how much of our Sources report is inferred rather than
+--     reported" is answerable at all, which is a question a customer is entitled
+--     to ask about a number we filled in for them,
+--   * it is how a bad mapping is FOUND -- one query grouping by this column,
+--     rather than re-deriving the inference from stored page URLs,
+--   * and it is empty for every row whose referrer the browser actually sent,
+--     which makes the two populations separable forever without a second table.
+--
+-- It holds the click-id KEY that produced the inference (`gclid`, `fbclid`, ...),
+-- never its value. The value is `[redacted]` in storage and stays that way
+-- (D-C2): presence of the key is the whole of the signal, and an exemption from
+-- the redaction rule would be a permanent widening of a privacy rule bought
+-- against a hypothetical.
+--
+-- Additive and nothing else. No materialized view changes, and none are needed:
+-- every rollup that benefits from D-C1 benefits through `referrer_domain`, which
+-- the views already group by, not through a new key. `sources_1h`/`_1d` keep
+-- their exact sort key. A pre-migration row reads back as `''`, which is the
+-- correct and honest answer -- nothing was inferred for it, because the
+-- inference did not exist yet.
+
+ALTER TABLE events_raw
+  ADD COLUMN IF NOT EXISTS click_id_source LowCardinality(String);

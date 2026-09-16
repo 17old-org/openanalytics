@@ -7,10 +7,17 @@
  * this file is what it enforces.
  *
  * The frame is the F-309 settlement (2026-08-08): public clients only, PKCE
- * required (the provider's job, not this file's), redirect URIs https or
- * loopback with no wildcards, and the scope ceiling stays whatever the
- * authorization server supports — registration introduces a client, it never
- * widens scopes.
+ * required (the provider's job, not this file's), redirect URIs https,
+ * loopback, or a native app's private-use scheme with no wildcards, and the
+ * scope ceiling stays whatever the authorization server supports:
+ * registration introduces a client, it never widens scopes.
+ *
+ * Private-use schemes are the one widening ADR-0047 D3 said would be made
+ * deliberately when a real client needed it. Cursor did (2026-08-28): its MCP
+ * client registers `cursor://anysphere.cursor-mcp/oauth/callback`, the RFC
+ * 8252 §7.1 shape for a desktop app with no web origin. PKCE being mandatory
+ * is what keeps this safe: another app claiming the scheme can catch the
+ * code but cannot finish the exchange without the verifier.
  */
 
 /** RFC 7591 §3.2.2's refusal vocabulary — the subset this server uses. */
@@ -36,6 +43,15 @@ export const MAX_REDIRECT_URIS = 10
 
 /** The hosts RFC 8252 §7.3 lets a native client listen on over plain http. */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '[::1]', 'localhost'])
+
+/**
+ * Schemes a redirect must never carry: the authorize step answers with a
+ * `Location` header, and any of these in it executes or reads in the
+ * authorize page's own context instead of launching an app. The structural
+ * authority-form check below also excludes them; the list is the named
+ * second lock.
+ */
+const FORBIDDEN_SCHEMES = new Set(['javascript:', 'data:', 'blob:', 'file:', 'about:', 'vbscript:'])
 
 export interface ValidatedClientRegistration {
   readonly redirectUris: readonly string[]
@@ -67,11 +83,17 @@ function refuse(error: ClientRegistrationError, description: string): ClientRegi
 /**
  * One redirect URI against ADR-0047 D3, or the sentence that refuses it.
  *
- * `https:` for any host; `http:` only for the loopback hosts, any port; no
- * fragment (RFC 6749 §3.1.2); no `*` anywhere in the string — a wildcard is
- * refused at registration so exact-match comparison at authorize time has
- * nothing to misjudge. Custom schemes are a policy widening to make
- * deliberately, not a default (ADR-0047 D3).
+ * `https:` for any host; `http:` only for the loopback hosts, any port; a
+ * private-use scheme (RFC 8252 §7.1) in `scheme://...` authority form for
+ * native clients; no fragment (RFC 6749 §3.1.2); no `*` anywhere in the
+ * string, since a wildcard refused at registration leaves exact-match
+ * comparison at authorize time nothing to misjudge.
+ *
+ * The authority-form requirement on custom schemes is structural safety, not
+ * pedantry: `javascript:alert(1)` and `data:text/html,...` are one-part
+ * URIs, so demanding `//` after the scheme shuts out the whole family of
+ * browser-executable payloads even before the denylist names the usual
+ * suspects.
  */
 function redirectUriRefusal(uri: string): string | null {
   if (uri.includes('*')) return `redirect_uri must not contain a wildcard: ${uri}`
@@ -87,7 +109,13 @@ function redirectUriRefusal(uri: string): string | null {
     if (LOOPBACK_HOSTS.has(parsed.hostname === '::1' ? '[::1]' : parsed.hostname)) return null
     return `http redirect_uri is only accepted on a loopback host: ${uri}`
   }
-  return `redirect_uri must be https or a loopback http URL: ${uri}`
+  if (FORBIDDEN_SCHEMES.has(parsed.protocol)) {
+    return `redirect_uri scheme is not allowed: ${uri}`
+  }
+  if (!uri.slice(parsed.protocol.length).startsWith('//')) {
+    return `custom-scheme redirect_uri must use the scheme://... authority form: ${uri}`
+  }
+  return null
 }
 
 /**

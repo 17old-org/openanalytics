@@ -3,7 +3,10 @@
 import {
   AiChat02Icon,
   ArrowLeft01Icon,
+  ArrowRight02Icon,
+  Cancel01Icon,
   InternetIcon,
+  Location01Icon,
   Message01Icon,
   MoreHorizontalCircle02Icon,
   PipelineIcon,
@@ -21,6 +24,8 @@ import * as React from "react";
 // `@hugeicons/core-free-icons` data package via our adapter, which wraps the
 // raw icon data into a component.
 import { ActivityCircleIcon } from "@/components/icons/hugeicons";
+import { useAnalyticsFilters } from "@/components/dashboard/filter-context";
+import { Favicon } from "@/components/dashboard/site-favicon";
 import {
   readGlobeVisitor,
   readGlobeVisitorServer,
@@ -39,6 +44,12 @@ import { useRealtime } from "@/hooks/use-realtime";
 import { submitNotifyForm } from "@seam/slots";
 import { assistant, errorCodeOf, LIVE_API, presentError } from "@/lib/api";
 import { useSession } from "@/lib/auth-client";
+import {
+  DIMENSION_LABEL,
+  filterValueLabel,
+  type FilterClause,
+} from "@/lib/analytics-filters";
+import { resolveReferrer } from "@/lib/referrers";
 import { cn } from "@/lib/utils";
 
 /**
@@ -101,6 +112,213 @@ const CHAT_INDEX = TABS.length;
 const MORE_INDEX = TABS.length + 1;
 
 const SPRING = { type: "spring", stiffness: 550, damping: 40 } as const;
+
+/* --------------------------------------------------------------------- */
+/* The filter tray                                                       */
+/* --------------------------------------------------------------------- */
+
+/**
+ * One filter value's mark, in the bar's own dark spelling: the favicon for
+ * a source (the direct arrow for Direct), the flag for a country, the pin
+ * for a city, the device glyph for a device. The same vocabulary the cards'
+ * rows wear, so the chip is recognisably the row that was clicked.
+ */
+function filterMark(clause: FilterClause, value: string): React.ReactNode {
+  switch (clause.dimension) {
+    case "referrer_domain":
+      return value === "" ? (
+        <ArrowRight02Icon className="size-3.5 text-white/70" />
+      ) : (
+        <Favicon
+          className="size-3.5 rounded-full object-cover"
+          domain={resolveReferrer(value).domain}
+        />
+      );
+    case "country":
+      return <FlagIcon className="size-3.5" code={value} />;
+    case "city":
+      return <Location01Icon className="size-3.5 text-white/70" />;
+    case "device_type":
+      return <DeviceGlyph className="size-3.5 text-white/70" deviceType={value} />;
+  }
+}
+
+/** How the chip spells one value; the source name is the resolved one, so
+ *  the chip says what the Sources row it came from said. */
+function filterLabel(clause: FilterClause, value: string): string {
+  if (clause.dimension === "referrer_domain" && value !== "") {
+    return resolveReferrer(value).name;
+  }
+  return filterValueLabel(clause.dimension, value);
+}
+
+/**
+ * One chip's marks, folded the way the card that produced them folds its
+ * rows: by what they are called.
+ *
+ * A press on the Sources card's Google row filters by every host that row
+ * holds, and `google.com`, `www.google.com` and `m.google.com` are three
+ * session values under one name. A mark per *value* drew that as three
+ * identical Google favicons, which reads as three presses nobody made. Distinct
+ * marks are the ones with distinct names, and a chip with one name gets its
+ * name printed beside the mark again, whatever number of hosts it took to
+ * mean it.
+ */
+function filterMarks(
+  clause: FilterClause
+): { label: string; value: string; values: string[] }[] {
+  const byLabel = new Map<string, string[]>();
+  for (const value of clause.values) {
+    const label = filterLabel(clause, value);
+    const group = byLabel.get(label) ?? [];
+    group.push(value);
+    byLabel.set(label, group);
+  }
+  // `value` is the one the mark is drawn from; `values` is what removing
+  // the chip takes away, every host the name stood for.
+  return [...byLabel.entries()].map(([label, values]) => ({
+    label,
+    value: values[0],
+    values,
+  }));
+}
+
+/**
+ * One chip: the mark(s), the name when it has one to print, and the remove.
+ * `layout` and the keyed presence are what let a chip split off or fold in
+ * without the neighbours jumping.
+ */
+function FilterChip({
+  children,
+  label,
+  onRemove,
+  ref,
+  removeLabel,
+  showLabel,
+}: {
+  /** The mark, or the marks, drawn in the bar's own dark spelling. */
+  children: React.ReactNode;
+  /** The full spelling: printed when `showLabel`, always in the title. */
+  label: string;
+  onRemove: () => void;
+  /**
+   * Handed straight to the root, and not optional in spirit: the tray's
+   * `popLayout` presence measures a leaving chip through this ref to lift
+   * it out of the flow. Without it the chip stayed in the row for its
+   * whole exit, the row wrapped, and the bar dipped a line on every fold.
+   */
+  ref?: React.Ref<HTMLSpanElement>;
+  removeLabel: string;
+  showLabel: boolean;
+}) {
+  return (
+    <motion.span
+      ref={ref}
+      animate={{ opacity: 1, scale: 1 }}
+      className="flex h-7 shrink-0 items-center gap-1.5 rounded-full bg-white/10 pl-2 pr-1 text-xs text-white/90"
+      exit={{ opacity: 0, scale: 0.9, transition: { duration: 0.1 } }}
+      initial={{ opacity: 0, scale: 0.9 }}
+      layout
+      title={label}
+      transition={SPRING}
+    >
+      <span aria-hidden="true" className="flex shrink-0 items-center gap-[3px]">
+        {children}
+      </span>
+      {showLabel ? (
+        <span className="max-w-32 truncate">{label}</span>
+      ) : (
+        <span className="sr-only">{label}</span>
+      )}
+      <button
+        aria-label={removeLabel}
+        className="flex size-4.5 shrink-0 cursor-pointer items-center justify-center rounded-full text-white/50 outline-none transition-colors hover:bg-white/15 hover:text-white focus-visible:ring-2 focus-visible:ring-white/40"
+        onClick={onRemove}
+        type="button"
+      >
+        <Cancel01Icon className="size-3" />
+      </button>
+    </motion.span>
+  );
+}
+
+/**
+ * The active filters, as a storey above the tab row. It follows the
+ * transcript storey's contract exactly (the storey only fades, the bar's
+ * measured springs do all the growing) and it draws only while the
+ * overview is on screen,
+ * because the overview is the one screen the filters describe. Removing
+ * the last chip removes the storey, and the bar springs back to the row.
+ *
+ * Up to two names in a dimension are two chips, each with its own mark, its
+ * own name and its own remove; from three on they fold into one chip of
+ * marks whose remove clears the dimension, because "Google +2" hides exactly
+ * what the chip exists to say, while three marks in a row ARE the list. The
+ * fold used to start at two (2026-09-01), and the cost was the remove:
+ * somebody with Google and GitHub who wanted only GitHub gone had to clear
+ * both and click Google again. Separate chips are separate removes. The
+ * folded chip's full spelling rides its hover title and a screen-reader
+ * span.
+ */
+function FilterTray() {
+  const { clauses, removeDimension, removeValues } = useAnalyticsFilters();
+  return (
+    <div>
+      {/* `justify-center`, because the block stretches to the capsule's
+          width whenever the tab row is the wider child, and left-packed
+          chips read as a misprint against a centred row. `flex-wrap` under
+          a viewport cap is the long-label answer: a chip never leaves the
+          capsule, it takes a second line, and the bar's measured springs treat
+          the taller storey like any other. The `px-3` keeps the outermost
+          chips off the capsule's 24px corner curve. */}
+      <div className="relative flex max-w-[calc(100vw-3rem)] flex-wrap items-center justify-center gap-1.5 px-3 pb-1.5 pt-2">
+        {/* popLayout, because of the fold. Going from two chips to the
+            folded one is two exits and one enter, and for the 100ms of the
+            exit the row held all three: wide enough to wrap, so the bar's
+            measured spring grew a line and shrank it again, a dip on every
+            third value. Popped out of the flow, the leaving chips fade
+            where they stood while the row is already the width it will
+            end at. `relative` on the row is what the popped chips are
+            positioned against. */}
+        <AnimatePresence initial={false} mode="popLayout">
+          {clauses.flatMap((clause) => {
+            const marks = filterMarks(clause);
+            if (marks.length > 2) {
+              const spelled = marks.map((mark) => mark.label).join(", ");
+              return [
+                <FilterChip
+                  key={clause.dimension}
+                  label={spelled}
+                  onRemove={() => removeDimension(clause.dimension)}
+                  removeLabel={`Remove the ${DIMENSION_LABEL[clause.dimension]} filter`}
+                  showLabel={false}
+                >
+                  {marks.map((mark) => (
+                    <span className="flex items-center" key={mark.label}>
+                      {filterMark(clause, mark.value)}
+                    </span>
+                  ))}
+                </FilterChip>,
+              ];
+            }
+            return marks.map((mark) => (
+              <FilterChip
+                key={`${clause.dimension}:${mark.label}`}
+                label={mark.label}
+                onRemove={() => removeValues(clause.dimension, mark.values)}
+                removeLabel={`Remove ${mark.label} from the ${DIMENSION_LABEL[clause.dimension]} filter`}
+                showLabel
+              >
+                {filterMark(clause, mark.value)}
+              </FilterChip>
+            ));
+          })}
+        </AnimatePresence>
+      </div>
+      <div className="mx-3 h-px bg-white/8" />
+    </div>
+  );
+}
 
 /**
  * The pill is a fixed window; the labels are a strip sliding behind it. The
@@ -237,6 +455,7 @@ export function TabBar() {
       : TOOLTIP_LABELS[tip];
 
   const [surface, setSurface] = React.useState<Surface>("none");
+  const filters = useAnalyticsFilters();
   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
   const [draft, setDraft] = React.useState("");
   const [thinking, setThinking] = React.useState(false);
@@ -603,6 +822,26 @@ export function TabBar() {
           />
 
           <div className="w-fit" ref={measureRef}>
+          {/* the filter tray storey, same contract as the transcript: the
+              storey fades, the measured springs grow. Overview only: the
+              filters describe that screen and no other, and only while no
+              face has taken the bar over, because a tray above the feedback sheet
+              would be two unrelated storeys pretending to be one panel. */}
+          <AnimatePresence initial={false}>
+            {surface === "none" &&
+            filters.active &&
+            (pathname === base || pathname.startsWith(`${base}?`)) ? (
+              <motion.div
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0, transition: { duration: 0.1 } }}
+                initial={{ opacity: 0 }}
+                key="filter-tray"
+                transition={{ duration: 0.18 }}
+              >
+                <FilterTray />
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
           {/* the transcript storey — the container's measured spring does the
               growing; the storey itself only fades so nothing double-drives */}
           <AnimatePresence initial={false}>
@@ -688,8 +927,13 @@ export function TabBar() {
             ) : null}
           </AnimatePresence>
 
-          {/* the main row — tabs, menu or chat input */}
-          <div className="flex items-center gap-1 p-1">
+          {/* the main row: tabs, menu or chat input. `justify-center`
+              matters only when a storey above is wider than the row (the
+              filter tray with several chips): the block stretches to the
+              storey's width and the tabs must hold the middle of the
+              capsule, not its left edge. When the row is the widest child
+              the centring is a no-op. */}
+          <div className="flex items-center justify-center gap-1 p-1">
             <AnimatePresence custom={surface === "none" ? -1 : 1} initial={false} mode="popLayout">
               {surface === "none" ? (
                 <motion.div

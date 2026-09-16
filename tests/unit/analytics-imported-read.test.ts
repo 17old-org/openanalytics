@@ -366,8 +366,26 @@ describe('the api merge', () => {
       'analytics.pages_hour',
     ])
     expect(result.items).toEqual([
-      { page_path: '/b', views: 3, visitors: 2 },
-      { page_path: '/a', views: 1, visitors: 1 },
+      // Undecorated: these callers ask for no session metrics, and `null`
+      // means "not measured on this response" rather than zero (ADR-0075).
+      {
+        page_path: '/b',
+        views: 3,
+        visitors: 2,
+        entrances: null,
+        exits: null,
+        bounces: null,
+        bounce_rate: null,
+      },
+      {
+        page_path: '/a',
+        views: 1,
+        visitors: 1,
+        entrances: null,
+        exits: null,
+        bounces: null,
+        bounce_rate: null,
+      },
     ])
     expect(result.meta.data_sources).toEqual(['live'])
     expect(result.meta.accuracy).toBe('exact')
@@ -421,9 +439,33 @@ describe('the api merge', () => {
     const result = await service.pages({ ...pagesRequest, ...BLENDED_RANGE })
 
     expect(result.items).toEqual([
-      { page_path: '/pricing', views: 110, visitors: 45 },
-      { page_path: '/', views: 60, visitors: 30 },
-      { page_path: '/blog', views: 50, visitors: 20 },
+      {
+        page_path: '/pricing',
+        views: 110,
+        visitors: 45,
+        entrances: null,
+        exits: null,
+        bounces: null,
+        bounce_rate: null,
+      },
+      {
+        page_path: '/',
+        views: 60,
+        visitors: 30,
+        entrances: null,
+        exits: null,
+        bounces: null,
+        bounce_rate: null,
+      },
+      {
+        page_path: '/blog',
+        views: 50,
+        visitors: 20,
+        entrances: null,
+        exits: null,
+        bounces: null,
+        bounce_rate: null,
+      },
     ])
     expect(result.meta.data_sources).toEqual(['live', 'imported'])
     expect(result.meta.accuracy).toBe('estimated')
@@ -456,7 +498,17 @@ describe('the api merge', () => {
 
     const result = await service.pages({ ...pagesRequest, ...BLENDED_RANGE })
 
-    expect(result.items).toEqual([{ page_path: '/pricing', views: 110, visitors: 45 }])
+    expect(result.items).toEqual([
+      {
+        page_path: '/pricing',
+        views: 110,
+        visitors: 45,
+        entrances: null,
+        exits: null,
+        bounces: null,
+        bounce_rate: null,
+      },
+    ])
     expect(typeof result.items[0]?.views).toBe('number')
   })
 

@@ -11,9 +11,11 @@ import {
   attributionFrom,
   billableCount,
   classifyEvents,
+  clickIdSourceOf,
   clientSessionHash,
   deriveVisitorContext,
   externalUserIdHash,
+  refSourceOf,
   resolveEventTime,
   resolveReferrer,
   sanitizeInteraction,
@@ -187,7 +189,6 @@ export function createEventRoutes(deps: CollectorDeps, limiter: IngestLimiter) {
       bot: false,
       ...('name' in event && event.name !== undefined ? { name: event.name } : {}),
       ...(event.action_id === undefined ? {} : { actionId: event.action_id }),
-      ...(batch.context.test_mode === undefined ? {} : { testMode: batch.context.test_mode }),
     }))
     const classifications = classifyEvents(candidates)
     const billable = billableCount(classifications)
@@ -218,6 +219,14 @@ export function createEventRoutes(deps: CollectorDeps, limiter: IngestLimiter) {
     // order lives; a second copy here would be two answers to "who is this".
     const rawAddress = readRawClientAddress(c)
 
+    // The envelopes, kept as objects rather than only as the JSON that goes on
+    // the queue: the realtime feed below needs one of them. It used to resolve
+    // the referrer a second time from the raw event, which was correct until an
+    // ingest inference existed and silently wrong afterwards -- a visitor whose
+    // source came from a click id (ADR-0075) or a `?ref=` tag (ADR-0077) showed
+    // as Direct on the live feed while the report the feed is the leading edge
+    // of named the source. One derivation, read twice.
+    const envelopes: PersistedEvent[] = []
     const enqueueInputs: EnqueueInput[] = batch.events.map((event, index) => {
       const time = times[index]?.time
       if (time === undefined || !time.accepted) {
@@ -237,7 +246,6 @@ export function createEventRoutes(deps: CollectorDeps, limiter: IngestLimiter) {
         receivedAt: gate.receivedAt,
         acceptedAt,
         billable: classifications[index]?.billable ?? false,
-        testMode: batch.context.test_mode === true,
         rule: ruleFor(event),
         usageWindowStart: window?.startsAt ?? acceptedAt,
         grace: gate.grace,
@@ -247,6 +255,7 @@ export function createEventRoutes(deps: CollectorDeps, limiter: IngestLimiter) {
         city: gate.client.city,
         rawAddress,
       })
+      envelopes[index] = persisted
 
       return {
         siteId: config.siteId,
@@ -336,10 +345,11 @@ export function createEventRoutes(deps: CollectorDeps, limiter: IngestLimiter) {
       // feed — the visitor is still present (the touch below runs either way),
       // but the page view already happened once and is already on it. A newly
       // enqueued view carries its *validated* occurred_at, the same instant the
-      // persisted row will hold, and the referrer through the same resolver the
-      // envelope uses — same canonical domain, same self-referral rule
-      // (ADR-0028), so the live feed and the report it is the leading edge of
-      // never disagree about a visitor's source.
+      // persisted row will hold, and its source **out of the envelope that was
+      // queued** — the same canonical domain, the same self-referral rule
+      // (ADR-0028) and the same ingest inferences, so the live feed and the
+      // report it is the leading edge of never disagree about a visitor's
+      // source.
       const feedTime = lastPageView === null ? undefined : times[lastPageView.index]?.time
       const feed =
         lastPageView !== null &&
@@ -348,10 +358,7 @@ export function createEventRoutes(deps: CollectorDeps, limiter: IngestLimiter) {
           ? {
               eventId: lastPageView.event.event_id,
               occurredAt: feedTime.occurredAt,
-              referrer: resolveReferrer(lastPageView.event.referrer, {
-                siteDomains: config.allowedDomains,
-                pageUrl: lastPageView.event.page?.url,
-              }).domain,
+              referrer: envelopes[lastPageView.index]?.source.referrer_domain ?? null,
             }
           : undefined
 
@@ -411,8 +418,6 @@ interface BuildPersistedInput {
   readonly receivedAt: Date
   readonly acceptedAt: Date
   readonly billable: boolean
-  /** Server-decided non-production traffic (ADR-0034, D6). */
-  readonly testMode: boolean
   /** The published rule this event was established as coming from, if any. */
   readonly rule: { readonly ruleId: string; readonly version: number } | null
   readonly usageWindowStart: Date
@@ -455,6 +460,38 @@ function buildPersistedEvent(input: BuildPersistedInput): PersistedEvent {
     pageUrl: event.page?.url,
   })
   const attribution = attributionFrom(page)
+  // A paid click that arrives with no referrer is not Direct (ADR-0075, D-C1).
+  // The ad platform's interstitial is cross-origin and the browser's default
+  // referrer policy removes the header outright, so the only surviving evidence
+  // of the channel is the click id the platform put in the landing URL. It is
+  // read here, on the way in, for the reason ADR-0028 gives for resolving the
+  // referrer here: `referrer_domain` is the rollup grouping key and
+  // `sources_1h` has already grouped by it before any reader exists to repair
+  // it. Repairing it at read time would have to be repeated in every future
+  // reader — the sources report, the session fact's entry attribution, revenue
+  // first/last touch — instead of once.
+  //
+  // **A self-referral still wins.** An internal navigation that carries a
+  // leftover `fbclid` in the URL — a visitor who landed from an ad and then
+  // clicked through to a second page whose link kept the parameter — is not a
+  // new acquisition, and `isSelf` is the guard that says so. Only a referrer
+  // that resolved to *nothing* may be filled in this way.
+  //
+  // The same guard admits the `?ref=` tag (ADR-0077, D-R1), and it is tried
+  // FIRST: a label a linking site or a customer wrote by hand names the source
+  // more precisely than a click id, which names only the platform that served
+  // the ad. Both are inferences on a referrer that resolved to nothing, so at
+  // most one of the two provenance columns is ever set on a row.
+  const derivable = referrer.domain === null && !referrer.isSelf
+  const ref = derivable ? refSourceOf(page) : null
+  const clickId = derivable && ref === null ? clickIdSourceOf(page) : null
+  const source = {
+    referrer_domain: ref?.domain ?? clickId?.domain ?? referrer.domain,
+    referrer_path: referrer.path,
+    click_id_source: clickId?.key ?? null,
+    ref_source: ref?.value ?? null,
+    ...attribution,
+  }
   // Two passes, and the order matters: sanitization decides what may be stored
   // at all, and the linking rule then decides whether what survived may be a
   // hint. Re-checked here rather than trusted from the browser (ADR-0064 D4a,
@@ -500,10 +537,8 @@ function buildPersistedEvent(input: BuildPersistedInput): PersistedEvent {
     usage_window_id: null,
     billing_grace: input.grace,
     billable: input.billable,
-    // Server-set, both of them. `test_mode` decides which ClickHouse table the
-    // worker writes to, and `rule_id` is only ever the id of a rule this site
-    // actually publishes -- never the one the client claimed (ADR-0034, D5/D6).
-    test_mode: input.testMode,
+    // Server-set: `rule_id` is only ever the id of a rule this site actually
+    // publishes -- never the one the client claimed (ADR-0034, D5).
     rule_id: input.rule?.ruleId ?? null,
     rule_version: input.rule?.version ?? null,
 
@@ -521,11 +556,7 @@ function buildPersistedEvent(input: BuildPersistedInput): PersistedEvent {
 
     page: page ? { url: page.url, path: page.path, title: event.page?.title ?? null } : null,
 
-    source: {
-      referrer_domain: referrer.domain,
-      referrer_path: referrer.path,
-      ...attribution,
-    },
+    source,
 
     properties,
 

@@ -104,12 +104,6 @@ const serviceSchemas = {
     // surfaces first and the API's is the backstop against a hung socket.
     QUERY_GATEWAY_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(20_000),
     REALTIME_TOKEN_SIGNING_KEY: secret.optional(),
-    // Mints rule-preview tokens (ADR-0034, D6). Its verify half sits on the
-    // collector; this private half is on the collector's FORBIDDEN_KEYS list, so
-    // the service that checks a preview token can never mint one. Optional: a
-    // deployment without it simply cannot start a preview, and the endpoint says
-    // so rather than the api refusing to boot over one feature.
-    PREVIEW_TOKEN_SIGNING_KEY: secret.optional(),
     REALTIME_CACHE_REDIS_URL: url.optional(),
     // Social login runs in the API (Better Auth). Providers are env-gated: a
     // provider is only offered when both its id and secret are present, so a
@@ -318,23 +312,13 @@ const serviceSchemas = {
      * refreshed monthly on the host and never committed.
      */
     GEOIP_DB_PATH: z.string().min(1).optional(),
-    /**
-     * Verify-only half of the rule-preview token (ADR-0034, D6). The api mints;
-     * this service only ever checks, and `PREVIEW_TOKEN_SIGNING_KEY` is on its
-     * FORBIDDEN_KEYS list below.
-     *
-     * Unset, `GET /v1/tracker/config?preview=…` ignores the parameter and serves
-     * the published rule set — a preview that cannot be authenticated is served
-     * as no preview at all, never as an unauthenticated one.
-     */
-    PREVIEW_TOKEN_VERIFY_KEY: z.string().min(16).optional(),
   }),
 
   worker: baseSchema.extend({
     DATABASE_URL: url.optional(),
     // The worker's half of the dashboard-configurable settings (migration 0043;
     // the api's schema above carries the full argument). `enabled` makes the
-    // email drain prefer the stored transport over `SMTP_*`/`RESEND_API_KEY`;
+    // email drain prefer the stored transport over provider keys and `SMTP_*`;
     // `disabled` makes it read the environment and nothing else.
     //
     // **Both services must agree, and nothing here reconciles them** — they are
@@ -387,6 +371,9 @@ const serviceSchemas = {
     // send to the outbox, and the worker delivers it (docs snapshot 02 §5,
     // G-007). The API never holds this key — see FORBIDDEN_KEYS below.
     RESEND_API_KEY: secret.optional(),
+    // Sendflare's transactional HTTP API. Worker-only for the same outbox
+    // boundary as Resend: the api enqueues, and only the worker delivers.
+    SENDFLARE_API_KEY: secret.optional(),
     // Allows the "Name <addr@domain>" form Resend accepts, so not `.email()`.
     EMAIL_FROM: z.string().min(3).optional(),
     /**
@@ -573,6 +560,7 @@ const FORBIDDEN_KEYS: Readonly<Record<ServiceEnvName, readonly string[]>> = {
     // delivers it. The API therefore never holds the email provider credential
     // (docs snapshot 02 §5).
     'RESEND_API_KEY',
+    'SENDFLARE_API_KEY',
     // The SMTP relay password is the self-hosted spelling of the same
     // credential, and lands on the same side of the same boundary: the worker
     // delivers mail, so the worker is the only service that may hold it.
@@ -589,16 +577,13 @@ const FORBIDDEN_KEYS: Readonly<Record<ServiceEnvName, readonly string[]>> = {
     'AUTH_SECRET',
     'QUERY_SIGNING_PRIVATE_KEY',
     'RESEND_API_KEY',
+    'SENDFLARE_API_KEY',
     // The SMTP relay password is the self-hosted spelling of the same
     // credential, and lands on the same side of the same boundary: the worker
     // delivers mail, so the worker is the only service that may hold it.
     'SMTP_PASS',
     'GOOGLE_CLIENT_SECRET',
     'GITHUB_CLIENT_SECRET',
-    // The collector verifies preview tokens and must never mint one (ADR-0034,
-    // D6). Holding this key would let a compromised collector serve itself any
-    // site's unpublished rules.
-    'PREVIEW_TOKEN_SIGNING_KEY',
     // NOTE: ANONYMOUS_IDENTITY_SECRET is deliberately NOT in this list — the
     // collector is the one service that must hold it (its own schema above).
     // It sat here from M4 until the first real deployment (2026-07-24), when
@@ -678,6 +663,7 @@ const FORBIDDEN_KEYS: Readonly<Record<ServiceEnvName, readonly string[]>> = {
     // and the credential that could bypass it does not belong here (ADR-0030 D4).
     'CLICKHOUSE_MAINTENANCE_PASSWORD',
     'RESEND_API_KEY',
+    'SENDFLARE_API_KEY',
     // The SMTP relay password is the self-hosted spelling of the same
     // credential, and lands on the same side of the same boundary: the worker
     // delivers mail, so the worker is the only service that may hold it.
@@ -715,6 +701,7 @@ const FORBIDDEN_KEYS: Readonly<Record<ServiceEnvName, readonly string[]>> = {
     'AUTH_SECRET',
     'REALTIME_TOKEN_SIGNING_KEY',
     'RESEND_API_KEY',
+    'SENDFLARE_API_KEY',
     // The SMTP relay password is the self-hosted spelling of the same
     // credential, and lands on the same side of the same boundary: the worker
     // delivers mail, so the worker is the only service that may hold it.

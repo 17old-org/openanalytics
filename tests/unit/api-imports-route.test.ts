@@ -289,6 +289,10 @@ describe('GET /v1/imports/providers', () => {
     expect(res.status).toBe(200)
     const body = (await res.json()) as { items: { id: string; available: boolean }[] }
     expect(body.items.find((item) => item.id === 'plausible')?.available).toBe(true)
+    // The api is what tells a picker a provider can be chosen, and the worker's
+    // registry is what makes the run succeed — so this flag and that list ship
+    // together, or a customer creates a run that fails `adapter_unavailable`.
+    expect(body.items.find((item) => item.id === 'umami')?.available).toBe(true)
     // Unavailable providers are listed, not hidden: the picker has to be able to
     // say "later" rather than only "no".
     expect(body.items.find((item) => item.id === 'matomo')?.available).toBe(false)

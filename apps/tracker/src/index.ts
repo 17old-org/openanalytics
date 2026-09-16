@@ -36,6 +36,8 @@ export {
 
 export {
   CONFIG_CACHE_TTL_MS,
+  SITE_GONE_TTL_MS,
+  isSiteGone,
   loadTrackerConfig,
   toRuntimeConfig,
   type ConfigLoaderDeps,

@@ -4,12 +4,15 @@ import {
   classifyImportedRange,
   coarsenPublicGeography,
   derivePreviousPeriod,
+  hasActiveFilters,
   MAX_FUNNEL_RANGE_MS,
   mergeImportedRows,
+  normalizeFilters,
   mergeSessionLayers,
   resolveAnalyticsSources,
   spansOneProviderDay,
   splitSessionRange,
+  type AnalyticsFilter,
   type AnalyticsSourceVerdict,
   type FunnelScope,
   type GeographyRow as DomainGeographyRow,
@@ -22,11 +25,16 @@ import {
 } from '@openanalytics/domain'
 import type { AnalyticsGateway } from '../gateway-client.ts'
 import {
+  FILTERABLE_REPORT_SLUGS,
+  FILTERED_MAX_SPAN_DAYS,
   IMPORT_RUN_OPERATIONS,
+  TIMEZONE_OPERATIONS,
   customEventSamplesOperationFor,
+  filteredOperationFor,
   importedReportOperationFor,
   operationParamsFor,
   overviewOperationFor,
+  pageSessionsOperationFor,
   reportOperationFor,
   resolveAggregate,
   resolveRevenue,
@@ -114,10 +122,39 @@ export interface AnalyticsRequest extends CacheEpochScoped, ImportScoped {
   readonly from: string
   readonly to: string
   readonly timezone: string
+  /**
+   * The session-scoped filter set (ADR-0075, D-F1), already parsed, validated
+   * and normalized at the edge.
+   *
+   * Absent or empty is the unfiltered read, and D-F4 makes that a structural
+   * promise rather than a hope: an empty set routes to the rollup operation,
+   * which is the only thing this field can do — the filtered operations refuse
+   * an empty filter list in their own parameter schema, so a future edit that
+   * sent an unfiltered read down the filtered path fails loudly instead of
+   * quietly costing a raw scan.
+   */
+  readonly filters?: readonly AnalyticsFilter[] | undefined
 }
 
 export interface AnalyticsReportRequest extends AnalyticsRequest {
   readonly limit: number
+}
+
+/** Which measure decides the pages report's top-N cut (ADR-0075, D-E2). */
+export type PagesSort = 'views' | 'entrances' | 'exits'
+
+export interface AnalyticsPagesRequest extends AnalyticsReportRequest {
+  /**
+   * Whether to read entry/exit/bounce from the session facts (ADR-0075, D-E1).
+   *
+   * Opt-in, and absent means no. The decoration is a second gateway query, and
+   * the surfaces that do not display it — the public share, the widget read —
+   * must not pay for it: their read stays byte-identical to what it was, which
+   * is the same rule D-F4 states for an unfiltered dashboard.
+   */
+  readonly sessionMetrics?: boolean | undefined
+  /** Absent is `views`, which is the pre-D-E2 behaviour exactly. */
+  readonly sort?: PagesSort | undefined
 }
 
 export interface AnalyticsOverviewRequest extends AnalyticsRequest {
@@ -442,6 +479,77 @@ export class AnalyticsService {
     })
   }
 
+  // ---- Filters (ADR-0075) ------------------------------------------------
+
+  /**
+   * The active filter set of a request, or the empty list.
+   *
+   * Normalized here as well as at the edge, and deliberately: the normal form is
+   * what makes two chip orders one cache entry, and the service is the last
+   * place that can guarantee it before the parameter map — which IS the cache
+   * key — is built.
+   */
+  #filtersOf(req: AnalyticsRequest): readonly AnalyticsFilter[] {
+    const filters = normalizeFilters(req.filters ?? [])
+    return hasActiveFilters(filters) ? filters : []
+  }
+
+  /**
+   * Refuses a filtered read the fact path cannot serve, by name (D-F5).
+   *
+   * Two refusals, and they are different failures with different recoveries:
+   * a report with no filtered twin is a `VALIDATION_FAILED` naming the report
+   * (the caller asked for something this build does not have), and a range wider
+   * than the raw path's cap is a `RANGE_TOO_LARGE` naming the cap (the request
+   * is well-formed and the recovery is "ask for less", which is exactly what
+   * that code already means everywhere else in this contract).
+   *
+   * Neither is a timeout, which is the whole point: a filtered read that cannot
+   * be answered says so in milliseconds.
+   */
+  #filteredOperation(operation: string, range: { from: string; to: string }): string {
+    const filtered = filteredOperationFor(operation)
+    if (filtered === null) {
+      throw new ApiError('VALIDATION_FAILED', 'this report does not accept a filter yet', {
+        details: {
+          operation,
+          supported_reports: FILTERABLE_REPORT_SLUGS,
+          issues: [{ path: 'filters', message: 'this report does not accept a filter yet' }],
+        },
+      })
+    }
+    const spanDays = (Date.parse(range.to) - Date.parse(range.from)) / 86_400_000
+    if (spanDays > FILTERED_MAX_SPAN_DAYS) {
+      throw new ApiError(
+        'RANGE_TOO_LARGE',
+        `a filtered read covers at most ${FILTERED_MAX_SPAN_DAYS} days`,
+        {
+          details: {
+            max_span_days: FILTERED_MAX_SPAN_DAYS,
+            requested_span_days: Number(spanDays.toFixed(2)),
+            reason: 'a filter is answered from the event and session facts, not from a rollup',
+          },
+        },
+      )
+    }
+    return filtered
+  }
+
+  /**
+   * Whether a filtered range reaches into days only the import can answer.
+   *
+   * A staged provider day carries no session — no entry source, no country, no
+   * device — so a session-scoped filter has nothing to select there and the
+   * filtered operations read live rows only. When the range overlaps such days
+   * the answer is genuinely missing a part of itself, and `meta.partial` is the
+   * field that already means exactly that.
+   */
+  #filteredPartial(range: { from: string; to: string }, req: AnalyticsRequest): boolean {
+    const pointer = req.importPointer ?? null
+    if (pointer === null) return false
+    return classifyImportedRange(range, pointer, req.timezone) !== 'live_only'
+  }
+
   // ---- Overview ---------------------------------------------------------
 
   async overview(req: AnalyticsOverviewRequest): Promise<Schemas['AnalyticsOverviewResponse']> {
@@ -449,12 +557,18 @@ export class AnalyticsService {
     if (!resolved.servable) this.#notServable(resolved.reason)
 
     const pointer = req.importPointer ?? null
+    const filters = this.#filtersOf(req)
     const operation = overviewOperationFor(resolved.sourceRollup)
     // The `no_data` override is only honest where the import is actually being
     // read: a range entirely after the cutover that comes back empty *is* empty,
     // and answering `ok` because the site imported something a year ago would
     // replace one wrong empty state with a wrong healthy one.
+    //
+    // A filtered read never reads the import — a provider day has no session for
+    // a session-scoped filter to select — so it is live-only, and `partial`
+    // below is what says so.
     const touchesImported =
+      filters.length === 0 &&
       classifyImportedRange(
         { from: resolved.effectiveFrom, to: resolved.effectiveTo },
         pointer,
@@ -469,6 +583,7 @@ export class AnalyticsService {
         req.cacheEpoch,
         pointer,
         req.timezone,
+        filters,
       ),
       this.#freshness(req.siteId, req.cacheEpoch, touchesImported ? pointer : null),
     ])
@@ -487,6 +602,7 @@ export class AnalyticsService {
           req.cacheEpoch,
           pointer,
           req.timezone,
+          filters,
         )
         comparison = { totals: prevTotals.totals }
       }
@@ -502,23 +618,32 @@ export class AnalyticsService {
         comparisonRange,
         truncated: primary.truncated,
         cached: primary.cached,
-        sources: resolveAnalyticsSources({
-          ranges: rangesOf(
-            { from: resolved.effectiveFrom, to: resolved.effectiveTo },
-            comparisonRange,
-          ),
-          pointer,
-          timezone: req.timezone,
-          surface: 'imported',
-          // A range total is `provider_defined` in exactly one case: the range is
-          // one provider day, so the total *is* that day's row. Two days already
-          // means summing dailies the provider refuses to add — the number is
-          // then ours, not theirs.
-          providerDefinedWhenFullyImported: spansOneProviderDay(
-            { from: resolved.effectiveFrom, to: resolved.effectiveTo },
-            req.timezone,
-          ),
-        }),
+        // A filtered total reads live rows only, so it claims nothing about the
+        // import — `partial` beside it says the range had imported days this
+        // answer could not include.
+        partial:
+          filters.length > 0 &&
+          this.#filteredPartial({ from: resolved.effectiveFrom, to: resolved.effectiveTo }, req),
+        sources:
+          filters.length > 0
+            ? LIVE_ONLY_SOURCES
+            : resolveAnalyticsSources({
+                ranges: rangesOf(
+                  { from: resolved.effectiveFrom, to: resolved.effectiveTo },
+                  comparisonRange,
+                ),
+                pointer,
+                timezone: req.timezone,
+                surface: 'imported',
+                // A range total is `provider_defined` in exactly one case: the range is
+                // one provider day, so the total *is* that day's row. Two days already
+                // means summing dailies the provider refuses to add — the number is
+                // then ours, not theirs.
+                providerDefinedWhenFullyImported: spansOneProviderDay(
+                  { from: resolved.effectiveFrom, to: resolved.effectiveTo },
+                  req.timezone,
+                ),
+              }),
       }),
       totals: primary.totals,
       comparison,
@@ -533,16 +658,24 @@ export class AnalyticsService {
     cacheEpoch: number | undefined,
     pointer: ImportPointer | null,
     timezone: string,
+    filters: readonly AnalyticsFilter[] = [],
   ): Promise<{ totals: Schemas['OverviewTotals']; truncated: boolean; cached: boolean }> {
     if (Date.parse(to) <= Date.parse(from)) {
       return { totals: emptyTotals(), truncated: false, cached: false }
     }
+    // A filtered total is a different operation over different tables, so the
+    // import parameters it does not declare are not bound — the operation id
+    // decides what it takes, here as everywhere else in this file.
+    const filtered = filters.length > 0
+    const target = filtered ? this.#filteredOperation(operation, { from, to }) : operation
     const result = await this.#gateway.query<Record<string, unknown>>(
-      operation,
-      // The zone is bound even though a total has no bucket to label: it decides
-      // which provider days the window contains, and the chart of this window
-      // decides the same thing the same way.
-      { site_id: siteId, from, to, ...operationParamsFor(operation, pointer, timezone) },
+      target,
+      filtered
+        ? { site_id: siteId, from, to, filters }
+        : // The zone is bound even though a total has no bucket to label: it decides
+          // which provider days the window contains, and the chart of this window
+          // decides the same thing the same way.
+          { site_id: siteId, from, to, ...operationParamsFor(operation, pointer, timezone) },
       { cacheEpoch },
     )
     const row = result.rows[0]
@@ -567,12 +700,17 @@ export class AnalyticsService {
     if (!resolved.servable) this.#notServable(resolved.reason)
 
     const pointer = req.importPointer ?? null
+    const filters = this.#filtersOf(req)
     // Minute and hour charts have no imported branch (an aggregate-only export
     // has no sub-day grain) but do apply the cutover, so they answer a knowable
-    // subset rather than the whole range.
-    const surface: ImportedSurface = IMPORT_RUN_OPERATIONS.has(resolved.operation)
-      ? 'imported'
-      : 'partitioned_live'
+    // subset rather than the whole range. A filtered chart has no imported
+    // branch at all, for the reason `overview` states.
+    const surface: ImportedSurface =
+      filters.length > 0
+        ? 'live'
+        : IMPORT_RUN_OPERATIONS.has(resolved.operation)
+          ? 'imported'
+          : 'partitioned_live'
     const touchesImported =
       surface === 'imported' &&
       classifyImportedRange(
@@ -589,6 +727,7 @@ export class AnalyticsService {
         req.timezone,
         req.cacheEpoch,
         pointer,
+        filters,
       ),
       this.#freshness(req.siteId, req.cacheEpoch, touchesImported ? pointer : null),
     ])
@@ -607,6 +746,7 @@ export class AnalyticsService {
           req.timezone,
           req.cacheEpoch,
           pointer,
+          filters,
         )
         comparison = { series: prevSeries.series }
       }
@@ -622,6 +762,9 @@ export class AnalyticsService {
         comparisonRange,
         truncated: primary.truncated,
         cached: primary.cached,
+        partial:
+          filters.length > 0 &&
+          this.#filteredPartial({ from: resolved.effectiveFrom, to: resolved.effectiveTo }, req),
         sources: resolveAnalyticsSources({
           ranges: rangesOf(
             { from: resolved.effectiveFrom, to: resolved.effectiveTo },
@@ -656,6 +799,7 @@ export class AnalyticsService {
     timezone: string,
     cacheEpoch: number | undefined,
     pointer: ImportPointer | null,
+    filters: readonly AnalyticsFilter[] = [],
   ): Promise<{ series: Schemas['TimeseriesPoint'][]; truncated: boolean; cached: boolean }> {
     if (Date.parse(to) <= Date.parse(from)) {
       return { series: [], truncated: false, cached: false }
@@ -663,13 +807,25 @@ export class AnalyticsService {
     // The operation id decides what it takes, in one place: every parameter
     // schema is a `strictObject`, so binding a zone or a cutover an operation
     // does not declare is rejected exactly as loudly as omitting one it does.
-    const params: Record<string, unknown> = {
-      site_id: siteId,
-      from,
-      to,
-      ...operationParamsFor(operation, pointer, timezone),
-    }
-    const result = await this.#gateway.query<Record<string, unknown>>(operation, params, {
+    const filtered = filters.length > 0
+    const target = filtered ? this.#filteredOperation(operation, { from, to }) : operation
+    const params: Record<string, unknown> = filtered
+      ? {
+          site_id: siteId,
+          from,
+          to,
+          filters,
+          // The filtered chart re-buckets `occurred_at` itself, so it takes the
+          // zone wherever the unfiltered one does and never takes a cutover.
+          ...(TIMEZONE_OPERATIONS.has(operation) ? { timezone } : {}),
+        }
+      : {
+          site_id: siteId,
+          from,
+          to,
+          ...operationParamsFor(operation, pointer, timezone),
+        }
+    const result = await this.#gateway.query<Record<string, unknown>>(target, params, {
       cacheEpoch,
     })
     return {
@@ -720,6 +876,9 @@ export class AnalyticsService {
   }> {
     const resolved = resolveAggregate(req)
     if (!resolved.servable) this.#notServable(resolved.reason)
+
+    const filters = this.#filtersOf(req)
+    if (filters.length > 0) return this.#filteredReport(slug, req, resolved, filters)
 
     const pointer = req.importPointer ?? null
     const effective = { from: resolved.effectiveFrom, to: resolved.effectiveTo }
@@ -782,21 +941,228 @@ export class AnalyticsService {
     }
   }
 
-  async pages(req: AnalyticsReportRequest): Promise<Schemas['AnalyticsPagesResponse']> {
-    const { meta, rows, imported } = await this.#report('pages', req)
+  /**
+   * A breakdown restricted to the sessions a filter set selects (ADR-0075).
+   *
+   * A **separate operation over the facts**, never a widening of the rollup read
+   * (D-F4): the unfiltered statement, its tables and its cost are exactly what
+   * they were, and the raw scan is paid only by the request that asked for it.
+   *
+   * There is no imported half. A staged provider day carries no session, so a
+   * session-scoped filter has nothing to select in it — the response is live-only
+   * and says so, and `partial` is set when the range reached into days the import
+   * owns, because a total that is quietly missing a fortnight is worse than one
+   * that admits it.
+   *
+   * The grain decision is the resolver's, unchanged, so a filtered and an
+   * unfiltered read of the same range answer over the same effective window.
+   */
+  async #filteredReport(
+    slug: ReportSlug,
+    req: AnalyticsReportRequest & { readonly sort?: PagesSort | undefined },
+    resolved: Extract<ReturnType<typeof resolveAggregate>, { servable: true }>,
+    filters: readonly AnalyticsFilter[],
+  ): Promise<{
+    meta: Schemas['AnalyticsMeta']
+    rows: readonly Record<string, unknown>[]
+    imported: readonly Record<string, unknown>[]
+  }> {
+    const effective = { from: resolved.effectiveFrom, to: resolved.effectiveTo }
+    const operation = this.#filteredOperation(
+      reportOperationFor(slug, resolved.sourceRollup),
+      effective,
+    )
+
+    const [primary, freshness] = await Promise.all([
+      this.#gateway.query<Record<string, unknown>>(
+        operation,
+        {
+          site_id: req.siteId,
+          ...effective,
+          // Deepened on exactly the same condition the unfiltered path deepens
+          // on: a session sort re-cuts this list afterwards, and a list already
+          // cut at the caller's limit would arrive missing the rows that cut is
+          // for. A `views` sort takes the caller's own limit, so a filtered read
+          // with no sort issues exactly the rows it returns.
+          limit: (req.sort ?? 'views') === 'views' ? req.limit : mergeFetchLimit(req.limit),
+          filters,
+        },
+        { cacheEpoch: req.cacheEpoch },
+      ),
+      this.#freshness(req.siteId, req.cacheEpoch, null),
+    ])
+
     return {
-      meta,
-      // Merged on the **page path alone**. The live pages report has no hostname
-      // dimension, and the staged table has one because a provider export can
-      // span several hosts of the same property — so the imported operation sums
-      // across hostnames before the top-N cut and the two lists share a key.
-      items: mergeImportedRows(rows.map(mapPageRow), imported.map(mapPageRow), {
-        keyOf: (row) => row.page_path,
-        add: (a, b) => ({ ...a, views: a.views + b.views, visitors: a.visitors + b.visitors }),
-        rank: (row) => row.views,
-        limit: req.limit,
-      }) as Schemas['AnalyticsPagesResponse']['items'],
+      meta: this.#meta({
+        requested: { from: req.from, to: req.to },
+        effective,
+        timezone: req.timezone,
+        resolution: resolved.grain,
+        freshness,
+        comparisonRange: null,
+        truncated: primary.meta.truncated,
+        cached: primary.meta.cached,
+        partial: this.#filteredPartial(effective, req),
+      }),
+      rows: primary.rows,
+      imported: [],
     }
+  }
+
+  /**
+   * Top pages, optionally decorated with entry, exit and bounce (ADR-0075, D-E1).
+   *
+   * The decoration is a **second operation joined by path**, exactly as the
+   * custom-events route joins its sample operation onto the counts report, and
+   * for the same two reasons: it reads a different table with different
+   * parameters (the session facts, no zone, no cutover), and the counts read is
+   * served to surfaces these fields have no business on. `analytics.pages_*` is
+   * not widened.
+   *
+   * A caller that asks for neither session metrics nor a session sort gets the
+   * pre-D-E1 read unchanged — one gateway query, the same rows, the same cut.
+   *
+   * **Sorting is a server decision (D-E2).** The top-N cut and the sort order are
+   * one decision: the rollup cuts by views, so a client that re-sorted the
+   * returned page by `exits` would be presenting that page's biggest exits as the
+   * site's biggest exits, and for a site with more paths than the limit those are
+   * different sets. So `sort` selects the rank, and when it is a session measure
+   * the import merge is taken at the deepened limit first and the final cut is
+   * made on the requested measure afterwards. The bound is the one ADR-0032 D2b
+   * already documents for the imported merge: a path outside `2 x limit` on
+   * BOTH reads can in principle outrank the last row of the merged list, and it
+   * is a path nobody was going to read.
+   */
+  async pages(req: AnalyticsPagesRequest): Promise<Schemas['AnalyticsPagesResponse']> {
+    const sort: PagesSort = req.sort ?? 'views'
+    // A session sort has to read the sessions, whatever the caller said about
+    // the decoration: there is no other source for the measure it orders by.
+    const wantsSessions = req.sessionMetrics === true || sort !== 'views'
+
+    const [{ meta, rows, imported }, sessions] = await Promise.all([
+      this.#report('pages', req),
+      wantsSessions ? this.#pageSessions(req) : Promise.resolve(null),
+    ])
+
+    // Merged on the **page path alone**. The live pages report has no hostname
+    // dimension, and the staged table has one because a provider export can
+    // span several hosts of the same property — so the imported operation sums
+    // across hostnames before the top-N cut and the two lists share a key.
+    const byViews = mergeImportedRows(rows.map(mapPageRow), imported.map(mapPageRow), {
+      keyOf: (row) => row.page_path,
+      add: (a, b) => ({ ...a, views: a.views + b.views, visitors: a.visitors + b.visitors }),
+      rank: (row) => row.views,
+      // Deepened only when a later cut on another measure still has to happen.
+      // A `views` sort takes the caller's own limit here, so its statement, its
+      // row count and its answer are byte-identical to the pre-D-E2 read.
+      limit: sort === 'views' ? req.limit : mergeFetchLimit(req.limit),
+    }) as Schemas['PageRow'][]
+
+    if (sessions === null) return { meta, items: byViews }
+
+    const decorated = byViews.map((row) => decoratePageRow(row, sessions))
+    const items = sort === 'views' ? decorated : this.#cutPagesBySession(decorated, sessions, req)
+
+    return {
+      // The decoration's own truncation is OR'd into the response's, because a
+      // client asking "is this list complete" means the whole list.
+      meta: { ...meta, truncated: meta.truncated || sessions.truncated },
+      items: items as Schemas['AnalyticsPagesResponse']['items'],
+    }
+  }
+
+  /**
+   * The final cut when the sort is a session measure.
+   *
+   * A path can be a busy exit and a thin view — a checkout confirmation, a 404,
+   * a deep-linked article — so the union has to include paths the views read
+   * never returned, or the very rows a customer opened this sort to find are the
+   * ones missing. Such a row enters with `views: 0` and `visitors: 0`, which is
+   * the same trade the imported merge already takes: the path is outside the
+   * deepened top-N by views, so its true value there is small, and reporting the
+   * bound rather than the number is the honest half of a cut that had to happen
+   * somewhere.
+   */
+  #cutPagesBySession(
+    decorated: readonly Schemas['PageRow'][],
+    sessions: PageSessionsRead,
+    req: AnalyticsPagesRequest,
+  ): Schemas['PageRow'][] {
+    const seen = new Set(decorated.map((row) => row.page_path))
+    const extras: Schemas['PageRow'][] = []
+    for (const [path, measures] of sessions.byPath) {
+      if (seen.has(path)) continue
+      extras.push({
+        page_path: path,
+        views: 0,
+        visitors: 0,
+        entrances: measures.entrances,
+        exits: measures.exits,
+        bounces: measures.bounces,
+        bounce_rate: bounceRateOf(measures),
+      })
+    }
+
+    const rank = pageRankOf(req.sort ?? 'views')
+    return [...decorated, ...extras]
+      .sort((a, b) => {
+        const difference = rank(b) - rank(a)
+        if (difference !== 0) return difference
+        // Ties break on the path, so equal counts come out in a stable order
+        // rather than in whichever list happened to be walked first — the same
+        // rule `mergeImportedRows` uses.
+        return a.page_path < b.page_path ? -1 : a.page_path > b.page_path ? 1 : 0
+      })
+      .slice(0, req.limit)
+  }
+
+  /**
+   * Entry, exit and bounce per path over the session facts.
+   *
+   * Read at `mergeFetchLimit` for the reason the custom-event sample read gives:
+   * a decoration that covered fewer paths than the list it decorates renders as
+   * a null on a row that has data. Unlike that one it also reports whether it was
+   * complete, because absence has to mean different things in the two cases —
+   * see `PageSessionsRead.complete`.
+   *
+   * A range the resolver cannot serve returns nothing and issues no query: the
+   * report running beside it is about to raise the same refusal with the reason
+   * in it, and two refusals for one request is one too many.
+   */
+  async #pageSessions(req: AnalyticsReportRequest): Promise<PageSessionsRead | null> {
+    const resolved = resolveAggregate(req)
+    if (!resolved.servable) return null
+
+    // A filtered pages screen reads the filtered twin, so `views` and
+    // `entrances` on one row describe the same population. The alternative —
+    // filtering one column and not the other — is two numbers in one table that
+    // quietly mean different things.
+    const filters = this.#filtersOf(req)
+    const range = { from: resolved.effectiveFrom, to: resolved.effectiveTo }
+    const base = pageSessionsOperationFor(resolved.sourceRollup)
+    const operation = filters.length > 0 ? this.#filteredOperation(base, range) : base
+
+    const fetchLimit = mergeFetchLimit(req.limit)
+    const result = await this.#gateway.query<Record<string, unknown>>(
+      operation,
+      {
+        site_id: req.siteId,
+        ...range,
+        limit: fetchLimit,
+        ...(filters.length > 0 ? { filters } : {}),
+      },
+      { cacheEpoch: req.cacheEpoch },
+    )
+
+    const byPath = new Map<string, PageSessionMeasures>()
+    for (const row of result.rows) {
+      byPath.set(str(row['page_path']), {
+        entrances: num(row['entrances']),
+        exits: num(row['exits']),
+        bounces: num(row['bounces']),
+      })
+    }
+    return { byPath, complete: result.rows.length < fetchLimit, truncated: result.meta.truncated }
   }
 
   async sources(req: AnalyticsReportRequest): Promise<Schemas['AnalyticsSourcesResponse']> {
@@ -1917,7 +2283,72 @@ function rangesOf(
 // the imported side has no event type to report.
 
 function mapPageRow(r: Record<string, unknown>): Schemas['PageRow'] {
-  return { page_path: str(r['page_path']), views: num(r['views']), visitors: num(r['visitors']) }
+  return {
+    page_path: str(r['page_path']),
+    views: num(r['views']),
+    visitors: num(r['visitors']),
+    // Undecorated until the session read lands on it. `null` here is the
+    // contract's "not measured on this response" and never a zero — the
+    // difference matters on the public surface, which never asks.
+    entrances: null,
+    exits: null,
+    bounces: null,
+    bounce_rate: null,
+  }
+}
+
+/** One path's session-grain measures, as the decoration operation returns them. */
+interface PageSessionMeasures {
+  readonly entrances: number
+  readonly exits: number
+  readonly bounces: number
+}
+
+interface PageSessionsRead {
+  readonly byPath: ReadonlyMap<string, PageSessionMeasures>
+  /**
+   * Whether the decoration covered every entry/exit path in the range.
+   *
+   * `rows.length < fetchLimit` and NOT the gateway's `meta.truncated`, which
+   * answers a different question: it is true only when a statement returned more
+   * rows than the operation's own `maxRows`, and this read's SQL `LIMIT` is well
+   * below that. A path absent from a complete read is a path no session entered
+   * or exited, which is `0`. A path absent from an incomplete one is unknown,
+   * which is `null`. Conflating them would print a confident zero on a busy page.
+   */
+  readonly complete: boolean
+  readonly truncated: boolean
+}
+
+/** `bounces / entrances`, or null when there is no denominator to divide by. */
+function bounceRateOf(measures: PageSessionMeasures | null): number | null {
+  if (measures === null || measures.entrances === 0) return null
+  return measures.bounces / measures.entrances
+}
+
+function decoratePageRow(row: Schemas['PageRow'], read: PageSessionsRead): Schemas['PageRow'] {
+  const found = read.byPath.get(row.page_path) ?? null
+  const measures = found ?? (read.complete ? { entrances: 0, exits: 0, bounces: 0 } : null)
+  if (measures === null) return row
+  return {
+    ...row,
+    entrances: measures.entrances,
+    exits: measures.exits,
+    bounces: measures.bounces,
+    bounce_rate: bounceRateOf(measures),
+  }
+}
+
+/** The rank a `sort` selects, so the cut and the order are one decision. */
+function pageRankOf(sort: PagesSort): (row: Schemas['PageRow']) => number {
+  switch (sort) {
+    case 'entrances':
+      return (row) => row.entrances ?? 0
+    case 'exits':
+      return (row) => row.exits ?? 0
+    case 'views':
+      return (row) => row.views
+  }
 }
 
 function mapSourceRow(r: Record<string, unknown>): Schemas['SourceRow'] {

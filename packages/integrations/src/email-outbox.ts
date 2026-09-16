@@ -330,7 +330,13 @@ export interface DueOutboxRow {
 export interface EmailOutboxStore {
   claimDue(limit: number): Promise<readonly DueOutboxRow[]>
   markDelivered(id: string, providerId: string): Promise<void>
-  markFailed(id: string, reason: string): Promise<void>
+  /**
+   * `terminal` says the failure has no later attempt that could succeed, so the
+   * store must end the row rather than requeue it. The distinction lives here
+   * rather than in the store because only this file knows what the three
+   * transport reasons mean: see the call sites below.
+   */
+  markFailed(id: string, reason: string, options?: { readonly terminal?: boolean }): Promise<void>
 }
 
 export interface ProcessEmailOutboxDeps {
@@ -363,18 +369,38 @@ export async function processEmailOutbox(
     try {
       message = toEmailMessage(parseEmailOutboxPayload(row.payload))
     } catch {
-      await deps.store.markFailed(row.id, 'invalid_payload')
+      // Terminal: a payload that does not parse today parses no better in a
+      // minute. Four more attempts would change nothing except when the row
+      // reaches its terminal status.
+      await deps.store.markFailed(row.id, 'invalid_payload', { terminal: true })
       failed += 1
       continue
     }
 
-    const outcome = await deps.transport.send(message)
+    // The row id as the provider's idempotency key. It is the only value in
+    // scope that is unique per queued message AND survives a reclaim unchanged
+    // — which is exactly the pair of properties deduplication needs, since the
+    // duplicate this guards against is the outbox handing the same row out
+    // twice after a worker died mid-send.
+    const outcome = await deps.transport.send(message, { idempotencyKey: row.id })
     if (outcome.ok) {
       await deps.store.markDelivered(row.id, outcome.id)
       delivered += 1
     } else {
-      deps.log?.('email_delivery_failed', { reason: outcome.reason, outboxId: row.id })
-      await deps.store.markFailed(row.id, outcome.reason)
+      // Of the three reasons, exactly one is permanent.
+      //
+      // `unavailable` is the provider being down, slow or throttling us, and
+      // that is what the retry schedule exists for. `unauthorized` is a refused
+      // credential — a real outage that an operator has to fix, so it keeps
+      // spending its attempts and reaches `dead`, where it pages. `invalid` is
+      // the message itself being unsendable, most often an address the provider
+      // will not accept; no schedule fixes that, and the one email on this
+      // system whose recipient is typed by an anonymous stranger is the feedback
+      // acknowledgement (`feedback_ack`), so `dead` would mean paging `critical`
+      // over a typo in a public form.
+      const terminal = outcome.reason === 'invalid'
+      deps.log?.('email_delivery_failed', { reason: outcome.reason, outboxId: row.id, terminal })
+      await deps.store.markFailed(row.id, outcome.reason, { terminal })
       failed += 1
     }
   }

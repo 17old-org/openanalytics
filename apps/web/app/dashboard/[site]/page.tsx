@@ -6,8 +6,13 @@ import { IntervalSelect } from "@/components/dashboard/interval-select";
 import { LocationsCard } from "@/components/dashboard/locations-card";
 import { OverviewChart } from "@/components/dashboard/overview-chart";
 import { OverviewStats } from "@/components/dashboard/overview-stats";
-import { RealtimeCard } from "@/components/dashboard/realtime-card";
+import { RefreshButton } from "@/components/dashboard/refresh-button";
+import {
+  OverviewLiveBadge,
+  RealtimeCard,
+} from "@/components/dashboard/realtime-card";
 import { RevenueCard } from "@/components/dashboard/revenue-card";
+import { ShareOverviewButton } from "@/components/dashboard/share-overview-button";
 import { TopPagesCard } from "@/components/dashboard/top-pages-card";
 import { TopSourcesCard } from "@/components/dashboard/top-sources-card";
 import { WebVitalsCard } from "@/components/dashboard/web-vitals-card";
@@ -26,8 +31,28 @@ export default async function OverviewPage({
     <IntervalProvider>
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between gap-4">
-        <h1 className="text-xl font-medium tracking-tight">Overview</h1>
-        <IntervalSelect />
+        {/* Baseline group, not items-center: the badge is text against the
+            heading's text, and mixed sizes only look level when they share a
+            baseline. Fed by the Realtime card's own stream through a module
+            store, so the heading never opens a second SSE connection. */}
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex items-baseline gap-2.5">
+            <h1 className="text-xl font-medium tracking-tight">Overview</h1>
+            <OverviewLiveBadge />
+          </div>
+          {/* Outside the baseline group: a bordered control against text
+              only looks level when it is centred, not baselined. */}
+          <RefreshButton />
+        </div>
+        {/* The active filters ride the tab bar's own tray (its filter face),
+            which is the one piece of chrome on every screen and the only one
+            with nothing else to be beside. The interval picker stays here,
+            because the window and the filter are different kinds of
+            statement and only the filter has marks. */}
+        <div className="flex items-center gap-2">
+          <ShareOverviewButton />
+          <IntervalSelect />
+        </div>
       </div>
 
       <OverviewStats />

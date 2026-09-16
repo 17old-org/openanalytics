@@ -21,6 +21,19 @@ import { cn } from "@/lib/utils";
 export const faviconUrl = (domain: string) =>
   `/api/favicon?domain=${encodeURIComponent(domain)}`;
 
+/**
+ * The allowlist as favicon candidates, in order: trimmed, lowercased, the
+ * blanks dropped. The overview poster walks this list until a mark loads,
+ * so its tile lands on the same favicon the dashboard's own tiles wear.
+ */
+export function faviconCandidates(
+  domains: readonly string[] | null | undefined
+): string[] {
+  return (domains ?? [])
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry !== "");
+}
+
 /** Favicon that falls back to a globe while empty/unresolvable.
  *  Render with `key={domain}` so the failed flag resets on a new domain. */
 export function Favicon({

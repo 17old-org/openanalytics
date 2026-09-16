@@ -34,7 +34,9 @@ import {
   OVERVIEW_RESOLUTIONS,
   TIMESERIES_RESOLUTIONS,
   parseCompare,
+  parseFilters,
   parseLimit,
+  parsePagesSort,
   parseRange,
   parseResolution,
 } from './analytics.ts'
@@ -848,6 +850,7 @@ export function createReadKeyRoutes(deps: ReadKeyDeps): Hono<Env> {
         cacheEpoch: c.get('siteCacheEpoch'),
         importPointer: c.get('siteImportPointer'),
         ...parseRange(query),
+        filters: parseFilters(query),
         compare: parseCompare(query),
         resolution: parseResolution(query, OVERVIEW_RESOLUTIONS),
       }),
@@ -862,6 +865,7 @@ export function createReadKeyRoutes(deps: ReadKeyDeps): Hono<Env> {
         cacheEpoch: c.get('siteCacheEpoch'),
         importPointer: c.get('siteImportPointer'),
         ...parseRange(query),
+        filters: parseFilters(query),
         compare: parseCompare(query),
         resolution: parseResolution(query, TIMESERIES_RESOLUTIONS),
       }),
@@ -889,12 +893,33 @@ export function createReadKeyRoutes(deps: ReadKeyDeps): Hono<Env> {
           importPointer: c.get('siteImportPointer'),
           ...parseRange(query),
           limit: parseLimit(query),
+          // Every report reachable through `report` is filterable (ADR-0075,
+          // D-F2) — custom events and performance are not mounted here.
+          filters: parseFilters(query),
         }),
       )
     })
   }
 
-  report('pages', (s, req) => s.pages(req))
+  // Pages carries the session decoration and the `sort` parameter (ADR-0075,
+  // D-E1/D-E2), so it is spelled out rather than folded into `report`. An
+  // unattended caller gets exactly what the dashboard gets — ADR-0042 D4's rule
+  // that an owner's own key sees what the owner sees.
+  reads.get('/pages', async (c) => {
+    const query = c.req.query()
+    return c.json(
+      await analytics().pages({
+        siteId: c.get('readPrincipal').siteId,
+        cacheEpoch: c.get('siteCacheEpoch'),
+        importPointer: c.get('siteImportPointer'),
+        ...parseRange(query),
+        limit: parseLimit(query),
+        filters: parseFilters(query),
+        sessionMetrics: true,
+        sort: parsePagesSort(query),
+      }),
+    )
+  })
   report('sources', (s, req) => s.sources(req))
   report('geography', (s, req) => s.geography(req))
   report('devices', (s, req) => s.devices(req))

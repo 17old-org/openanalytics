@@ -14,6 +14,7 @@ import {
   importDateOf,
   type ImportAdapter,
   type ImportFailureCategory,
+  type ImportedReport,
   type ImportReportSummary,
   type ImportRunSummary,
   type ImportSummaryWarning,
@@ -507,6 +508,21 @@ interface EntryPlan {
 const UNNAMED_DROPPED_REPORT = 'other'
 
 /**
+ * Every report one entry fills.
+ *
+ * `reportsForEntry` is optional, and its absence is the ordinary case: a
+ * provider that ships one daily-aggregate CSV per report answers
+ * `reportForEntry` and the list is that answer or nothing. An event-level
+ * provider ships one event table that all eight reports are aggregated from, and
+ * for it the list is the honest answer.
+ */
+function claimedReports(adapter: ImportAdapter, entryName: string): readonly ImportedReport[] {
+  if (adapter.reportsForEntry) return adapter.reportsForEntry(entryName)
+  const report = adapter.reportForEntry(entryName)
+  return report === null ? [] : [report]
+}
+
+/**
  * Decide what every entry in the archive is, before any of it is parsed.
  *
  * An entry the adapter does not claim ends the run. That looks strict and it is
@@ -514,10 +530,13 @@ const UNNAMED_DROPPED_REPORT = 'other'
  * provider's export, and importing "the parts we recognised" would give them a
  * dashboard silently missing whatever was skipped.
  *
- * Two entries claiming one report also ends the run. A provider ships one file
- * per report, and staging both would double every number in it — the kind of
- * error that stays invisible until somebody compares a total against their old
- * dashboard.
+ * Two entries claiming one report also ends the run. Whether a provider ships
+ * one file per report or one file behind all of them, exactly one entry fills
+ * any given report — and staging two would double every number in it, the kind
+ * of error that stays invisible until somebody compares a total against their
+ * old dashboard. **One entry under many reports is the other direction and is
+ * fine**: `staged` maps report → entry, so the same entry appearing under eight
+ * keys is eight reports with one source, not two sources for one report.
  */
 function planEntries(adapter: ImportAdapter, entries: readonly ArchiveEntry[]): EntryPlan {
   const staged = new Map<string, ArchiveEntry>()
@@ -525,19 +544,21 @@ function planEntries(adapter: ImportAdapter, entries: readonly ArchiveEntry[]): 
   const droppedPattern = adapter.droppedEntryPattern()
 
   for (const entry of entries) {
-    const report = adapter.reportForEntry(entry.name)
-    if (report !== null) {
-      if (!adapter.expectedEntryPattern(report).test(entry.name)) {
-        throw new ImportRunFailure('unexpected_entry', 'entry name does not match its report', {
-          entry: entry.name,
-        })
+    const reports = claimedReports(adapter, entry.name)
+    if (reports.length > 0) {
+      for (const report of reports) {
+        if (!adapter.expectedEntryPattern(report).test(entry.name)) {
+          throw new ImportRunFailure('unexpected_entry', 'entry name does not match its report', {
+            entry: entry.name,
+          })
+        }
+        if (staged.has(report)) {
+          throw new ImportRunFailure('unexpected_entry', 'two entries claim the same report', {
+            report,
+          })
+        }
+        staged.set(report, entry)
       }
-      if (staged.has(report)) {
-        throw new ImportRunFailure('unexpected_entry', 'two entries claim the same report', {
-          report,
-        })
-      }
-      staged.set(report, entry)
       continue
     }
     if (droppedPattern !== null && droppedPattern.test(entry.name)) {

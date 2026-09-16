@@ -22,6 +22,7 @@ import {
   ExternalLinkIcon as HugeExternalLinkIcon,
   Flag03Icon as HugeFlagIcon,
   GithubIcon as HugeGithubIcon,
+  Refresh01Icon as HugeRefreshIcon,
   GitPullRequestIcon as HugeGitPullRequestIcon,
   GoogleIcon as HugeGoogleIcon,
   CircleDashedIcon as HugeCircleDashedIcon,
@@ -152,6 +153,7 @@ export const ExternalLinkIcon = createIcon(
 );
 export const FlagIcon = createIcon(HugeFlagIcon as IconSvgElement);
 export const GithubIcon = createIcon(HugeGithubIcon as IconSvgElement);
+export const RefreshIcon = createIcon(HugeRefreshIcon as IconSvgElement);
 export const GitPullRequestIcon = createIcon(
   HugeGitPullRequestIcon as IconSvgElement,
 );

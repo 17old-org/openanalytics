@@ -91,10 +91,18 @@ const ALL_PROVIDER_IDS: AuthProvider["id"][] = [
 ];
 
 export function LoginForm({
+  next,
   oauthError,
   oauthErrorDescription,
   verified,
 }: {
+  /**
+   * Where sign-in should land, already validated by the page (`safeNext`):
+   * a same-origin relative path or null for the dashboard. Today the one
+   * sender is the invite acceptance page, which is also the one value the
+   * banner below recognises.
+   */
+  next: string | null;
   /** `?error=` exactly as a failed callback left it; the page reads it. */
   oauthError: string | null;
   oauthErrorDescription: string | null;
@@ -102,6 +110,22 @@ export function LoginForm({
   verified: boolean;
 }) {
   const router = useRouter();
+
+  /** Every door out of this form points here instead of at `/dashboard`. */
+  const destination = next ?? "/dashboard";
+  /**
+   * The invite context, recognised by prefix: the acceptance page is the only
+   * route that sends people here with a `next` today, and the banner should
+   * not fire for whatever route does it second.
+   */
+  const acceptingInvite = next !== null && next.startsWith("/invites/accept");
+  /**
+   * The URL a *failed* provider or magic-link callback returns to. Carrying
+   * `next` through the failure matters as much as through success: the retry
+   * that follows must still know where it was going.
+   */
+  const loginPath =
+    next === null ? "/login" : `/login?next=${encodeURIComponent(next)}`;
 
   // Somebody already signed in has no business on a login form: the landing's
   // "Sign in" cannot know the session (the cookie lives on the api origin and
@@ -112,8 +136,8 @@ export function LoginForm({
   const { data: session, isPending } = useSession();
   React.useEffect(() => {
     if (!LIVE_API) return;
-    if (session !== null && session !== undefined) router.replace("/dashboard");
-  }, [session, router]);
+    if (session !== null && session !== undefined) router.replace(destination);
+  }, [session, router, destination]);
 
   /**
    * Whether this browser remembers a session, read on the first client render
@@ -310,7 +334,7 @@ export function LoginForm({
 
     setProviderError(null);
     if (!LIVE_API) {
-      router.push("/dashboard");
+      router.push(destination);
       return;
     }
 
@@ -318,8 +342,8 @@ export function LoginForm({
     try {
       const { error: failed } = await authClient.signIn.social({
         provider,
-        callbackURL: originURL("/dashboard"),
-        errorCallbackURL: originURL("/login"),
+        callbackURL: originURL(destination),
+        errorCallbackURL: originURL(loginPath),
       });
       if (failed) {
         setProviderError(presentAuthError(failed).message);
@@ -346,8 +370,8 @@ export function LoginForm({
     try {
       const { error: failed } = await authClient.signIn.magicLink({
         email: email.trim(),
-        callbackURL: originURL("/dashboard"),
-        errorCallbackURL: originURL("/login"),
+        callbackURL: originURL(destination),
+        errorCallbackURL: originURL(loginPath),
       });
       if (failed) {
         setError(presentAuthError(failed).message);
@@ -405,7 +429,7 @@ export function LoginForm({
     setBusy(true);
 
     if (!LIVE_API) {
-      router.push("/dashboard");
+      router.push(destination);
       return;
     }
 
@@ -414,7 +438,9 @@ export function LoginForm({
       // A full navigation, not `router.push`: the session arrived as a cookie
       // on a response this client did not route through, and the dashboard's
       // gate has to read it fresh.
-      window.location.assign("/dashboard");
+      // The relative destination resolves against this origin, exactly as
+      // the literal did.
+      window.location.assign(destination);
     } catch (thrown) {
       setBusy(false);
       setError(
@@ -452,7 +478,7 @@ export function LoginForm({
     setBusy(true);
 
     if (!LIVE_API) {
-      router.push("/dashboard");
+      router.push(destination);
       return;
     }
 
@@ -466,7 +492,9 @@ export function LoginForm({
         setError(presentAuthError(failed).message);
         return;
       }
-      window.location.assign("/dashboard");
+      // The relative destination resolves against this origin, exactly as
+      // the literal did.
+      window.location.assign(destination);
     } catch (thrown) {
       setBusy(false);
       setError(authErrorFromThrown(thrown).message);
@@ -480,7 +508,13 @@ export function LoginForm({
     // it does not jump when the redirect lands.
     return (
       <div className="flex min-h-[26rem] w-full max-w-sm items-center justify-center">
-        <BrandLoader label="Taking you to your dashboard…" />
+        <BrandLoader
+          label={
+            acceptingInvite
+              ? "Taking you back to your invitation…"
+              : "Taking you to your dashboard…"
+          }
+        />
       </div>
     );
   }
@@ -584,6 +618,21 @@ export function LoginForm({
                     {verified ? (
                       <p className="rounded-xl bg-success/10 px-3 py-2 text-xs leading-5 text-success-foreground">
                         Email verified. Sign in to continue.
+                      </p>
+                    ) : null}
+
+                    {/* The one thing the wrong-account incident proved this
+                        page must say: the account choice that breaks an
+                        invitation happens HERE, on the provider button that
+                        helpfully picks the personal account, so here is
+                        where the warning has to stand. Above the buttons,
+                        in the verified pill's shape with the product's own
+                        tint. */}
+                    {acceptingInvite ? (
+                      <p className="rounded-xl bg-primary/10 px-3 py-2 text-xs leading-5 text-primary">
+                        You&apos;re accepting a team invitation. Sign in with
+                        the email address the invite was sent to. No account
+                        yet? It&apos;ll be created right here.
                       </p>
                     ) : null}
 

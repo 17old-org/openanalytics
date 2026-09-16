@@ -5,6 +5,7 @@ import {
   type RevenueAdapter,
   type RevenueAdapterRegistry,
   type RevenueEventNormalization,
+  type RevenueWebhookHeaders,
 } from '@openanalytics/domain'
 import type { CredentialVault } from '@openanalytics/integrations'
 import {
@@ -76,20 +77,24 @@ import { readCappedRawBody } from './raw-body.ts'
 const REVENUE_WEBHOOK_PATH = '/revenue/webhooks/:provider/:webhook_token'
 
 /**
- * Which header carries the signature, per provider.
+ * There was a provider → signature-header-name map here. **The second provider
+ * retired it**, exactly as the comment on it predicted.
  *
- * A map here rather than a member on `RevenueAdapter`, and the reason is that a
- * header name is a *transport* fact while the adapter owns *semantics*. With one
- * live provider a map of one is honest; when a second lands and the two disagree
- * about more than a header — Paddle signs a different payload shape, Lemon
- * Squeezy uses a plain HMAC header — the right move is to hand the adapter the
- * whole header set and let it pick, not to grow this literal. Unknown providers
- * fall through to `null`, and a delivery with no signature header fails
- * verification like any other unsigned body.
+ * The map worked while a signature was one named header whose *value* was all an
+ * adapter needed. Polar breaks both halves of that: it signs Standard Webhooks
+ * style over three headers, and its event body carries **no id at all**, so the
+ * `webhook-id` header is the delivery identity `revenue_provider_events` dedupes
+ * on. A map of header names cannot express "and also the id is up here", and
+ * growing it would have meant this transport layer learning each provider's
+ * signing scheme — which is the one thing the adapter port exists to prevent.
+ *
+ * So the whole header set travels and the adapter picks. That is the same split
+ * drawn everywhere else here: the transport carries bytes and resolves nothing,
+ * the adapter owns semantics. Stripe's behaviour is unchanged — it reads
+ * `stripe-signature` out of the set and hands the identical string to the
+ * identical verifier — and the pipeline suites that were written against the map
+ * still pass without an edit, which is the proof rather than the claim.
  */
-const SIGNATURE_HEADERS: Readonly<Record<string, string>> = {
-  stripe: 'stripe-signature',
-}
 
 /**
  * The body cap, applied before `JSON.parse` (D4).
@@ -116,7 +121,12 @@ export interface RevenueWebhookInput {
   readonly provider: string
   readonly webhookToken: string
   readonly rawBody: string
+  /** A single pre-resolved signature header, for a caller that holds one. The
+   * route no longer sets it; it passes `headers`. */
   readonly signatureHeader: string | undefined
+  /** Every header of the delivery, lowercased. What the adapter actually reads —
+   * see the note where the header-name map used to be. */
+  readonly headers?: RevenueWebhookHeaders
   readonly now?: Date
 }
 
@@ -225,6 +235,7 @@ export async function processRevenueWebhook(
   const verified = adapter.verifyWebhook({
     rawBody: input.rawBody,
     signatureHeader: input.signatureHeader,
+    ...(input.headers === undefined ? {} : { headers: input.headers }),
     signingSecret,
     now,
   })
@@ -249,7 +260,13 @@ export async function processRevenueWebhook(
     return { status: 'malformed' }
   }
 
-  const normalized = adapter.normalizeEvent(parsed)
+  // The header set travels here too, and not for symmetry: for Polar the
+  // event's own **identity** is a header (`webhook-id`) because the body carries
+  // no id, and `providerEventId` below is what the ledger dedupes a redelivery
+  // on. An adapter whose provider puts the id in the body ignores this.
+  const normalized = adapter.normalizeEvent(parsed, {
+    ...(input.headers === undefined ? {} : { headers: input.headers }),
+  })
   if (!normalized.ok) return { status: 'malformed' }
   const event = normalized.event
 
@@ -554,7 +571,6 @@ export function createRevenueWebhookRoutes(deps: RevenueWebhookDeps): Hono<Env> 
     const raw = await readCappedRawBody(c.req, maxBytes)
     if (!raw.ok) return c.json({ received: false }, 413)
 
-    const headerName = SIGNATURE_HEADERS[provider]
     const requestLogger = deps.logger ?? c.get('logger')
     const result = await processRevenueWebhook(
       { ...deps, ...(requestLogger ? { logger: requestLogger } : {}) },
@@ -562,7 +578,10 @@ export function createRevenueWebhookRoutes(deps: RevenueWebhookDeps): Hono<Env> 
         provider,
         webhookToken: c.req.param('webhook_token'),
         rawBody: raw.body,
-        signatureHeader: headerName === undefined ? undefined : c.req.header(headerName),
+        // Nothing is resolved here any more. Hono lowercases header names, which
+        // is the form every adapter reads and the form the port documents.
+        signatureHeader: undefined,
+        headers: c.req.header(),
       },
     )
 

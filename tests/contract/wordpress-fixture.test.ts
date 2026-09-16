@@ -94,6 +94,15 @@ function stubRows(operation: string): Record<string, string>[] {
   if (operation.startsWith('analytics.timeseries')) {
     return [{ bucket: '2026-07-16 00:00:00', events: '1200', pageviews: '980', visitors: '380' }]
   }
+  // Before `analytics.pages`, because `startsWith` would otherwise swallow it.
+  // The read surface decorates the pages report with entry/exit/bounce
+  // (ADR-0075, D-E1), and a fixture that recorded those fields as nulls would
+  // teach a plugin author that they are never populated.
+  if (operation.startsWith('analytics.page_sessions')) {
+    return [
+      { page_path: '/pricing', entrances: '120', exits: '95', bounces: '48', sessions: '150' },
+    ]
+  }
   if (operation.startsWith('analytics.pages')) {
     return [{ page_path: '/pricing', views: '310', visitors: '260' }]
   }

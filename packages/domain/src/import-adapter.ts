@@ -330,6 +330,31 @@ export interface ImportAdapter {
    */
   reportForEntry(entryName: string): ImportedReport | null
 
+  /**
+   * Every report an entry fills, for a provider that ships **one file behind
+   * several reports**.
+   *
+   * Optional, and absent for the common case: a provider that exports one
+   * daily-aggregate CSV per report answers `reportForEntry` and nothing else,
+   * and the pipeline's single-report path is unchanged for it. An event-level
+   * provider (Umami) ships one event table that every report is *aggregated
+   * from*, and the honest description of that entry is a list rather than a
+   * choice.
+   *
+   * What the pipeline does with the list is the minimal thing: the entry is
+   * planned under each report, and `parseEntry` is then called once per report
+   * exactly as before — so the entry is inflated and read **once per report**,
+   * each pass building only that report's aggregation state. The alternative,
+   * one pass yielding batches for eight reports at once, would hold all eight
+   * states in memory simultaneously and would make `parseEntry`'s single-report
+   * type a lie.
+   *
+   * An adapter that implements this **must** keep `reportForEntry` consistent
+   * with it — the first element, or null — because the two answer the same
+   * question and a caller is entitled to either.
+   */
+  reportsForEntry?(entryName: string): readonly ImportedReport[]
+
   /** Entries this adapter knows about and deliberately does not stage (D2). They
    * pass validation and are recorded as a summary note. */
   droppedEntryPattern(): RegExp | null
@@ -355,10 +380,10 @@ export interface ImportAdapter {
  *
  * A `Map` rather than a module-level singleton, so a test can compose a registry
  * containing exactly the adapter it means to exercise and the production
- * registry stays the one place a real adapter is switched on. CP2 ships **no
- * production adapter**: the Plausible one is CP3, and until then every run of
- * every provider fails `adapter_unavailable`, which is the honest answer for a
- * build with no parser rather than a half-import.
+ * registry stays the one place a real adapter is switched on. Two adapters ship
+ * today — Plausible and Umami — and a run naming any other catalog provider
+ * fails `adapter_unavailable`, which is the honest answer for a build with no
+ * parser rather than a half-import.
  */
 export type ImportAdapterRegistry = ReadonlyMap<string, ImportAdapter>
 
@@ -375,6 +400,88 @@ export function createImportAdapterRegistry(
     registry.set(adapter.providerId, adapter)
   }
   return registry
+}
+
+// --- The live vocabulary -----------------------------------------------------
+
+/*
+ * Shared by every adapter, and here rather than in one of them because the rule
+ * is not the provider's — it is *this system's*.
+ *
+ * The dimension values a provider ships are translated into the tokens the live
+ * classifier emits, never stored as the provider spells them. Plausible writes
+ * `Desktop`/`macOS`, Umami writes `desktop`/`Mac OS`, and the live path writes
+ * `desktop`/`macos` (`anonymous-identity.ts`). Staging either provider's
+ * spelling would put two rows on every merged breakdown — one for each side of
+ * the cutover — that a customer would read as two different devices.
+ *
+ * What stays per-adapter is the **spelling table**: which provider strings map
+ * onto which token. That is a fact about the provider. What is shared is the
+ * fallback rule, the unknown token, the country rule and the closed device
+ * vocabulary, because a second adapter differing on any of those would be a
+ * second answer to a question the live side has only one answer to.
+ */
+
+/**
+ * The token the live classifier uses when it could not tell.
+ *
+ * `normalizeUserAgentClass` returns `unknown` for an unresolvable device, browser
+ * or OS, so an imported row with a blank one has to say `unknown` too — an empty
+ * string would be a third value that merges with neither.
+ *
+ * Geography is deliberately different: the live path stores `''` for a country or
+ * city it could not resolve (`normalizeCountry` returns null, which reaches
+ * `events_raw` as the empty string), so an imported blank country stays blank.
+ */
+export const IMPORT_UNKNOWN_TOKEN = 'unknown'
+
+/** `UserAgentClass['deviceType']` — the only four values the live side emits, so
+ * the only four an imported devices row may carry. Providers spell them the same
+ * way up to case, which is why this table is shared and the browser/OS ones are
+ * not. */
+export const IMPORT_DEVICE_TOKENS: Readonly<Record<string, string>> = {
+  desktop: 'desktop',
+  mobile: 'mobile',
+  tablet: 'tablet',
+}
+
+/**
+ * Provider spelling → this system's token.
+ *
+ * The fallback differs by dimension because the live vocabularies do:
+ *
+ * - **`closed`** is `device_type`, whose live values are exactly
+ *   `desktop|mobile|tablet|unknown` (`UserAgentClass`). A fifth value cannot come
+ *   out of the live classifier, so a provider's `Smart TV` has no live row to
+ *   merge with and belongs in `unknown` rather than as a category only imported
+ *   ranges can ever show.
+ * - **`open`** is browser and OS, whose live rules name a handful of families and
+ *   answer `unknown` for the rest. A browser this table has not heard of is still
+ *   a real browser: lowercasing keeps it distinct, while folding it into
+ *   `unknown` would merge it with the genuinely unresolvable rows.
+ *
+ * An empty value is `unknown` either way, which is what the live classifier
+ * returns for a user agent it could not read.
+ */
+export function importLiveToken(
+  value: string,
+  table: Readonly<Record<string, string>>,
+  vocabulary: 'closed' | 'open',
+): string {
+  const lowered = value.trim().toLowerCase()
+  if (lowered === '') return IMPORT_UNKNOWN_TOKEN
+  return table[lowered] ?? (vocabulary === 'closed' ? IMPORT_UNKNOWN_TOKEN : lowered)
+}
+
+/** ISO-3166-1 alpha-2, uppercased — `normalizeCountry`'s rule, minus the null:
+ * the live rollup stores the empty string for a country it could not resolve, so
+ * that is what an unusable provider value becomes here. `XX` and `T1` are the
+ * placeholders some platforms send for unknown or Tor-exit addresses, and storing
+ * one would put a fake nation in a customer's dashboard. */
+export function importLiveCountry(value: string): string {
+  const upper = value.trim().toUpperCase()
+  if (!/^[A-Z]{2}$/.test(upper) || upper === 'XX' || upper === 'T1') return ''
+  return upper
 }
 
 // --- Value scrubbing ---------------------------------------------------------
@@ -401,6 +508,16 @@ export const IMPORT_TRUNCATION_SENTINEL = '…'
 
 /** The reserved warning code for values the cap cut (D6.3). */
 export const DIMENSION_TRUNCATED_WARNING = 'dimension_truncated'
+
+/** The reserved code D2 names: the geography city column was present and carried
+ * values this system has no column for. Shared rather than per-adapter because
+ * every provider that ships a city loses it here, whatever it ships it as — a
+ * GeoNames id (Plausible) or a plain name (Umami). */
+export const CITY_DROPPED_WARNING = 'city_dropped'
+
+/** Columns the header carried that no report reads. Counted, not named: a column
+ * name is provider text and this warning is rendered to the customer. */
+export const UNKNOWN_COLUMN_WARNING = 'unknown_columns'
 
 /**
  * Make a provider-supplied dimension value safe to store and to show (D6.3).

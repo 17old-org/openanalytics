@@ -8,7 +8,12 @@ import {
   revenueWebhookPath,
   type RevenueAdapter,
 } from '@openanalytics/domain'
-import { STRIPE_REVENUE_PROVIDER_ID, createStripeRevenueAdapter } from '@openanalytics/integrations'
+import {
+  POLAR_REVENUE_PROVIDER_ID,
+  STRIPE_REVENUE_PROVIDER_ID,
+  createPolarRevenueAdapter,
+  createStripeRevenueAdapter,
+} from '@openanalytics/integrations'
 import { describe, expect, it } from 'vitest'
 import { fakeRevenueAdapter } from '../support/revenue-fixtures.ts'
 
@@ -22,15 +27,16 @@ import { fakeRevenueAdapter } from '../support/revenue-fixtures.ts'
  */
 
 describe('revenue provider catalog', () => {
-  it('offers Stripe and only Stripe in this build', () => {
-    // D1's scope cut: F-303 chose Stripe as the launch provider, and the
-    // adapter framework plus Stripe is what M12 ships. Anything else marked
-    // available would promise a connection with no adapter behind it.
+  it('offers Stripe and Polar, and nothing without an adapter behind it', () => {
+    // M12 shipped the framework plus Stripe (D1's scope cut); Polar is the
+    // second provider and arrived as a catalog flip. Anything else marked
+    // available would promise a connection nothing can complete — the picker
+    // renders this list verbatim.
     const available = REVENUE_PROVIDERS.filter((provider) => provider.available)
-    expect(available.map((provider) => provider.id)).toEqual(['stripe'])
+    expect(available.map((provider) => provider.id)).toEqual(['stripe', 'polar'])
   })
 
-  it('lists the five follow-up providers rather than hiding them', () => {
+  it('lists the four follow-up providers rather than hiding them', () => {
     // "Supported later" and "not something we do" are different answers, and a
     // catalog carrying only working adapters could give only the second.
     expect(REVENUE_PROVIDERS.map((provider) => provider.id)).toEqual([
@@ -57,11 +63,28 @@ describe('revenue provider catalog', () => {
     expect(findRevenueProvider('stripe')?.available).toBe(true)
   })
 
-  it('names the same provider the Stripe adapter registers under', () => {
+  it('names the same providers the adapters register under', () => {
     // A drift between the two would make the catalog offer a provider the
     // registry has no adapter for — a 503 on a row the picker said was ready.
     expect(STRIPE_REVENUE_PROVIDER_ID).toBe('stripe')
     expect(findRevenueProvider(STRIPE_REVENUE_PROVIDER_ID)?.available).toBe(true)
+    expect(POLAR_REVENUE_PROVIDER_ID).toBe('polar')
+    expect(findRevenueProvider(POLAR_REVENUE_PROVIDER_ID)?.available).toBe(true)
+  })
+
+  it('registers both real adapters side by side, which is the whole claim', () => {
+    // The registry refuses a duplicate id, so this also proves the two adapters
+    // do not collide — and it is the exact composition both `main.ts` files use.
+    const registry = createRevenueAdapterRegistry([
+      createStripeRevenueAdapter(),
+      createPolarRevenueAdapter(),
+    ])
+    expect([...registry.keys()].sort()).toEqual(['polar', 'stripe'])
+
+    // Every provider the catalog advertises must resolve to an adapter here.
+    for (const provider of REVENUE_PROVIDERS.filter((row) => row.available)) {
+      expect(registry.get(provider.id)?.providerId).toBe(provider.id)
+    }
   })
 })
 

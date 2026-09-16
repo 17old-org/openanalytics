@@ -472,7 +472,17 @@ describeIfPostgres('the OAuth grant arm on the business subtree (ADR-0048 D2)', 
       const res = await mcp(token, 'tools/list')
       expect(res.status).toBe(200)
       const { result } = (await res.json()) as {
-        result: { tools: { name: string; annotations?: { readOnlyHint: boolean } }[] }
+        result: {
+          tools: {
+            name: string
+            annotations?: {
+              readOnlyHint: boolean
+              destructiveHint?: boolean
+              idempotentHint?: boolean
+              openWorldHint?: boolean
+            }
+          }[]
+        }
       }
       const create = result.tools.find((t) => t.name === 'create_funnel')
       expect(create).toBeDefined()
@@ -481,6 +491,15 @@ describeIfPostgres('the OAuth grant arm on the business subtree (ADR-0048 D2)', 
       expect(result.tools.find((t) => t.name === 'list_sites')?.annotations?.readOnlyHint).toBe(
         true,
       )
+      // Every tool spells out all four hints. Directory reviews scan for the
+      // annotation rather than infer it, so an omitted `destructiveHint`
+      // reads to them as an unannotated tool (2026-08-29).
+      for (const tool of result.tools) {
+        expect(typeof tool.annotations?.readOnlyHint).toBe('boolean')
+        expect(typeof tool.annotations?.destructiveHint).toBe('boolean')
+        expect(typeof tool.annotations?.idempotentHint).toBe('boolean')
+        expect(tool.annotations?.openWorldHint).toBe(false)
+      }
     })
 
     it('creates a funnel through tools/call, and refuses a viewer as tool content', async () => {

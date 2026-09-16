@@ -15,6 +15,7 @@ import {
   BreakdownRow,
   useSiteAnalytics,
 } from "@/components/dashboard/analytics-card";
+import { useAnalyticsFilters } from "@/components/dashboard/filter-context";
 import { HoverList } from "@/components/dashboard/hover-list";
 import {
   SeeAllModal,
@@ -84,6 +85,15 @@ export type FoldedRow = {
   direct: boolean;
   views: number;
   visitors: number;
+  /**
+   * The raw `referrer_domain` values this row folded together, and what a
+   * click filters by. The filter matches the canonical host exactly
+   * (ADR-0075), and folding is by display name, which can merge more than
+   * one host under one label; filtering by every host the row actually
+   * holds is the only way the filtered numbers describe the row that was
+   * clicked. Direct's raw value is the contract's own `""`.
+   */
+  raw: string[];
 };
 
 /** The referrer dimension: every row's domain, "" folding into Direct. */
@@ -100,9 +110,13 @@ export function foldReferrers(items: SourceRow[]): FoldedRow[] {
       direct: source === null,
       views: 0,
       visitors: 0,
+      raw: [],
     };
     bucket.views += row.views;
     bucket.visitors += row.visitors;
+    if (!bucket.raw.includes(row.referrer_domain)) {
+      bucket.raw.push(row.referrer_domain);
+    }
     byLabel.set(label, bucket);
   }
   return [...byLabel.values()].sort((a, b) => b.views - a.views);
@@ -124,6 +138,7 @@ function foldUtm(
       direct: false,
       views: 0,
       visitors: 0,
+      raw: [],
     };
     bucket.views += row.views;
     bucket.visitors += row.visitors;
@@ -150,7 +165,11 @@ export function sourceMark(row: FoldedRow): React.ReactNode {
 }
 
 export function TopSourcesCard() {
-  const resource = useSiteAnalytics(getAnalyticsSources, MOCK_SOURCES);
+  const { enabled, active, filtersParam, addFilter, hasValue } =
+    useAnalyticsFilters();
+  const resource = useSiteAnalytics(getAnalyticsSources, MOCK_SOURCES, {
+    filters: filtersParam,
+  });
   const [view, setView] = React.useState<SourceView>("referrers");
   const [open, setOpen] = React.useState(false);
   const current = VIEWS.find((entry) => entry.id === view) ?? VIEWS[0];
@@ -197,7 +216,11 @@ export function TopSourcesCard() {
       }
     >
       <AnalyticsCardBody
-        emptyBody="No referrers in this range yet."
+        emptyBody={
+          active
+            ? "No visits match these filters."
+            : "No referrers in this range yet."
+        }
         isEmpty={(data) => data.items.length === 0}
         resource={resource}
       >
@@ -232,6 +255,25 @@ export function TopSourcesCard() {
                           icon={sourceMark(row)}
                           key={row.label}
                           name={row.label}
+                          // Referrers only: the utm cuts have no filter
+                          // dimension in v1, so their rows stay plain rows.
+                          onSelect={
+                            enabled &&
+                            view === "referrers" &&
+                            // Already filtered by every host this row folds:
+                            // the press would add nothing, so the row does not
+                            // offer one. Under a source filter this is most of
+                            // the rows left standing.
+                            !row.raw.every((domain) =>
+                              hasValue("referrer_domain", domain)
+                            )
+                              ? () => {
+                                  for (const domain of row.raw) {
+                                    addFilter("referrer_domain", domain);
+                                  }
+                                }
+                              : undefined
+                          }
                           pct={share(row.visitors)}
                           value={row.visitors.toLocaleString("en-US")}
                         />

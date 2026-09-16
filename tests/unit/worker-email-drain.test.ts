@@ -37,14 +37,14 @@ async function boot(env: ServiceEnv<'worker'>) {
 }
 
 describe('worker mail transport boot line', () => {
-  it('warns and names both variables when nothing is configured', async () => {
+  it('warns and names every transport variable when nothing is configured', async () => {
     const line = await boot(workerEnv({}))
 
     expect(line['level']).toBe('warn')
     expect(line['transport']).toBe('log')
-    expect(line['missing']).toEqual(['RESEND_API_KEY', 'SMTP_HOST'])
+    expect(line['missing']).toEqual(['SENDFLARE_API_KEY', 'RESEND_API_KEY', 'SMTP_HOST'])
     // The operator's next action has to be in the line, not inferred from it.
-    expect(line['detail']).toContain('RESEND_API_KEY or SMTP_HOST')
+    expect(line['detail']).toContain('SENDFLARE_API_KEY or RESEND_API_KEY or SMTP_HOST')
     // And the thing the dry run went looking for: the link is not in the log.
     expect(line['detail']).toContain('written nowhere')
   })
@@ -64,6 +64,13 @@ describe('worker mail transport boot line', () => {
 
     expect(line['level']).toBe('info')
     expect(line['transport']).toBe('resend')
+  })
+
+  it('selects Sendflare once its key is configured', async () => {
+    const line = await boot(workerEnv({ SENDFLARE_API_KEY: 'live-not-a-real-key' }))
+
+    expect(line['level']).toBe('info')
+    expect(line['transport']).toBe('sendflare')
   })
 })
 

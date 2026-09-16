@@ -12,6 +12,7 @@ import {
   markOutboxDelivered,
   markOutboxFailed,
   readOutboxBacklog,
+  reclaimStalledOutbox,
   type Database,
 } from '@openanalytics/postgres'
 import { REALTIME_SITE_EPOCH_SUBJECT, type RealtimeCache } from '@openanalytics/redis'
@@ -381,6 +382,26 @@ export function startOutboxDispatcher(deps: OutboxDispatcherDeps): OutboxDispatc
     if (running || stopped) return
     running = true
     try {
+      // Crash recovery before delivery, every tick and for every topic.
+      //
+      // Here rather than inside `drainOutboxTopic` because the sweep is not
+      // per-topic: it returns rows abandoned by a dead process across the whole
+      // table, including the two topics this dispatcher does not own. Running it
+      // once per tick instead of once per registration also keeps it one
+      // statement rather than one per topic.
+      //
+      // Logged only when it finds something. A reclaim is never routine — it
+      // means a worker died mid-delivery — so a line here is evidence, and a
+      // steady stream of them is the restart loop rule 13 alerts on.
+      try {
+        const reclaimed = await reclaimStalledOutbox(deps.db)
+        if (reclaimed > 0) deps.logger.warn('outbox_reclaimed', { rows: reclaimed })
+      } catch (err) {
+        // Never at the cost of the drain: delivery is the loop's job, and a
+        // failed sweep only means the rows wait for the next tick.
+        deps.logger.warn('outbox_reclaim_failed', { err, retryable: true })
+      }
+
       for (const registration of topics) {
         const result = await drainOutboxTopic(deps, registration)
         if (result.claimed > 0) {

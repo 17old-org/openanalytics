@@ -5,6 +5,7 @@ name: CI
 # credentials. The token is pinned to read-only so a fork PR cannot use it.
 permissions:
   contents: read
+  packages: write
 
 on:
   push:

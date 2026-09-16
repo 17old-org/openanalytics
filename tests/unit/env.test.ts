@@ -108,6 +108,9 @@ describe('service environment', () => {
     expect(() => loadServiceEnv('api', testEnv({ RESEND_API_KEY: 're_'.padEnd(32, 'x') }))).toThrow(
       /least-privilege secret boundary/,
     )
+    expect(() =>
+      loadServiceEnv('api', testEnv({ SENDFLARE_API_KEY: 'live_'.padEnd(32, 'x') })),
+    ).toThrow(/least-privilege secret boundary/)
   })
 
   it('refuses to give the worker an OAuth client secret', () => {
@@ -277,6 +280,19 @@ describe('service environment', () => {
 
     for (const service of ['api', 'collector', 'query-gateway', 'realtime'] as const) {
       expect(() => loadServiceEnv(service, testEnv({ SMTP_PASS: 'relay-secret' }))).toThrow(
+        /least-privilege secret boundary/,
+      )
+    }
+  })
+
+  it('gives the worker a Sendflare key and keeps it off every other service', () => {
+    const key = 'live_'.padEnd(32, 'x')
+    expect(loadServiceEnv('worker', testEnv({ SENDFLARE_API_KEY: key })).SENDFLARE_API_KEY).toBe(
+      key,
+    )
+
+    for (const service of ['api', 'collector', 'query-gateway', 'realtime'] as const) {
+      expect(() => loadServiceEnv(service, testEnv({ SENDFLARE_API_KEY: key }))).toThrow(
         /least-privilege secret boundary/,
       )
     }

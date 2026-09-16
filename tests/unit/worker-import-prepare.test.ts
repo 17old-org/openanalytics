@@ -1,5 +1,5 @@
 import { ImportedInsertError } from '@openanalytics/clickhouse'
-import { createImportAdapterRegistry } from '@openanalytics/domain'
+import { createImportAdapterRegistry, umamiImportAdapter } from '@openanalytics/domain'
 import { ObjectStorageError, type ObjectStorage } from '@openanalytics/integrations'
 import { createRecordingMetrics } from '@openanalytics/observability'
 import type { Database, ImportRunRow, ImportUploadRow } from '@openanalytics/postgres'
@@ -7,11 +7,13 @@ import type * as PostgresModule from '@openanalytics/postgres'
 import { createCapturedLogger } from '@openanalytics/testkit'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  buildUmamiZip,
   buildZip,
   fixtureCsv,
   fixtureEntryName,
   testFixtureAdapter,
   TEST_FIXTURE_PROVIDER,
+  UMAMI_EVENT_CSV,
 } from '../support/import-fixtures.ts'
 
 /**
@@ -381,6 +383,89 @@ describe('import_prepare — the happy path', () => {
       `${RUN}:metrics:2`,
       `${RUN}:pages:0`,
       `${RUN}:pages:1`,
+    ])
+  })
+})
+
+describe('import_prepare — one entry behind several reports', () => {
+  /** The event-level shape: one `website_event.csv` that all eight reports are
+   * aggregated from, read once per report. */
+  function umamiContext(policy: Record<string, unknown> = {}) {
+    world.run = runRow({ provider: 'umami' })
+    world.archive = buildUmamiZip()
+    return context({
+      resources: {
+        objectStorage: storage,
+        importedAggregatesWriter: writer,
+        importedAggregatesMaintenance: maintenance,
+        importAdapters: createImportAdapterRegistry([umamiImportAdapter]),
+        importPolicy: { ...POLICY, ...policy },
+      },
+    })
+  }
+
+  it('plans one entry under all eight reports and stages every one', async () => {
+    // `planEntries` maps report → entry, so the same entry under eight keys is
+    // eight reports with one source. The "two entries claim the same report"
+    // guard is about the other direction and stays.
+    const { input } = umamiContext()
+    expect(await executeImportPrepare(input)).toBe('succeeded')
+    expect(Object.keys(calls.summaries[0]?.['reports'] as object).sort()).toEqual([
+      'browsers',
+      'custom_events',
+      'devices',
+      'geography',
+      'metrics',
+      'os',
+      'pages',
+      'sources',
+    ])
+    // One insert per report, each under the deterministic retry token.
+    expect(calls.inserts.map((insert) => insert.token).sort()).toEqual(
+      [
+        'browsers',
+        'custom_events',
+        'devices',
+        'geography',
+        'metrics',
+        'os',
+        'pages',
+        'sources',
+      ].map((report) => `${RUN}:${report}:0`),
+    )
+  })
+
+  it('spends the shared uncompressed budget once per entry, not once per pass', async () => {
+    // Eight passes over one entry inflate its bytes eight times. Counted eight
+    // times, the shipped 1 GiB entry cap against a 2 GiB total would trip
+    // `zip_bomb` on the third pass and tell a customer their export is hostile.
+    // The budget here is barely above one pass and comfortably below two.
+    const once = Buffer.byteLength(UMAMI_EVENT_CSV, 'utf8')
+    const { input } = umamiContext({ maxTotalUncompressedBytes: Math.ceil(once * 1.5) })
+    expect(await executeImportPrepare(input)).toBe('succeeded')
+    expect(calls.transitions.at(-1)).toMatchObject({ to: 'ready_for_review' })
+  })
+
+  it('still refuses two entries that claim the same report', async () => {
+    // The guard that stops a doubled number, which one-entry-many-reports must
+    // not have quietly removed.
+    const { input } = umamiContext()
+    world.archive = buildUmamiZip({
+      extra: [{ name: 'website_event_copy.csv', content: UMAMI_EVENT_CSV }],
+    })
+    expect(await executeImportPrepare(input)).toBe('succeeded')
+    expect(calls.transitions.at(-1)).toMatchObject({ to: 'failed' })
+  })
+
+  it('leaves an adapter with no reportsForEntry on exactly the path it was on', async () => {
+    // The single-report contract is the ordinary case and the optional member is
+    // absent for it, so the plan is still one entry per report.
+    expect(testFixtureAdapter.reportsForEntry).toBeUndefined()
+    const { input } = context()
+    expect(await executeImportPrepare(input)).toBe('succeeded')
+    expect(Object.keys(calls.summaries[0]?.['reports'] as object).sort()).toEqual([
+      'metrics',
+      'pages',
     ])
   })
 })

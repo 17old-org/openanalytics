@@ -23,7 +23,7 @@ import {
 /**
  * Email delivery is a worker job (docs snapshot 02 §5): the API only writes the
  * send to the outbox, and this loop drains it through whichever transport is
- * configured — Resend, SMTP, or the log transport when neither is.
+ * configured — Sendflare, Resend, SMTP, or the log transport when none is.
  *
  * Since migration 0043 there are two places a transport can come from, and this
  * file is where they are reconciled. **A transport stored in the database wins
@@ -48,7 +48,7 @@ export function createEmailOutboxStore(db: Database): EmailOutboxStore {
   return {
     claimDue: (limit) => claimDueOutbox(db, { topic: EMAIL_OUTBOX_TOPIC, limit }),
     markDelivered: (id) => markOutboxDelivered(db, id),
-    markFailed: (id, reason) => markOutboxFailed(db, id, reason),
+    markFailed: (id, reason, options) => markOutboxFailed(db, id, reason, options),
   }
 }
 
@@ -83,7 +83,16 @@ function fingerprint(block: SmtpEnvBlock | undefined, source: string): string {
 
 export function startEmailDrain(deps: EmailDrainDeps): EmailDrain {
   const store = createEmailOutboxStore(deps.db)
-  const log = (event: string, fields: Record<string, unknown>) => deps.logger.info(event, fields)
+  // One sink, two levels, chosen by the one field that changes what an operator
+  // should do. A retryable failure is traffic — the next tick handles it — and
+  // belongs at `info`. A terminal one is a message that will never be sent, and
+  // since it now ends at `failed` rather than `dead` it raises no alert of its
+  // own (`markOutboxFailed`, and `worker_outbox_backlog` gauges only pending,
+  // processing and dead). `warn` is what keeps it findable in the log instead of
+  // disappearing quietly, which is the failure mode this whole change is
+  // supposed to avoid rather than move.
+  const log = (event: string, fields: Record<string, unknown>) =>
+    fields['terminal'] === true ? deps.logger.warn(event, fields) : deps.logger.info(event, fields)
 
   /**
    * The vault, for the stored transport's password.
@@ -143,10 +152,15 @@ export function startEmailDrain(deps: EmailDrainDeps): EmailDrain {
     if (transport !== undefined && next === currentFingerprint) return transport
 
     transport = selectEmailTransport({
-      // A stored relay wins over `RESEND_API_KEY` as well as over `SMTP_*`. The
-      // env-vs-env tie still goes to Resend (`selectEmailTransport`), so nothing
-      // about our own deployment changes: it stores nothing here.
-      ...(stored ? {} : { apiKey: deps.env.RESEND_API_KEY }),
+      // A stored relay wins over provider keys as well as over `SMTP_*`. Among
+      // environment transports Sendflare wins, then Resend, then SMTP; every
+      // conflict is logged by `selectEmailTransport`.
+      ...(stored
+        ? {}
+        : {
+            sendflareApiKey: deps.env.SENDFLARE_API_KEY,
+            apiKey: deps.env.RESEND_API_KEY,
+          }),
       smtp: block,
       defaultFrom: deps.env.EMAIL_FROM ?? 'noreply@localhost',
       log,
@@ -161,6 +175,7 @@ export function startEmailDrain(deps: EmailDrainDeps): EmailDrain {
     // in the log finds nothing.
     if (transport.id === 'log') {
       const missing = [
+        ...(deps.env.SENDFLARE_API_KEY ? [] : ['SENDFLARE_API_KEY']),
         ...(deps.env.RESEND_API_KEY ? [] : ['RESEND_API_KEY']),
         ...(deps.env.SMTP_HOST ? [] : ['SMTP_HOST']),
       ]
@@ -182,6 +197,15 @@ export function startEmailDrain(deps: EmailDrainDeps): EmailDrain {
   let running = false
   let stopped = false
 
+  // No `reclaimStalledOutbox` call here, and the omission is deliberate rather
+  // than an oversight — this loop needs the sweep as much as any, it just
+  // already has it. The sweep is table-wide, not per-topic, and the outbox
+  // dispatcher runs it at the top of every one of its own 5-second ticks; both
+  // loops are started inside the same `if (env.DATABASE_URL)` block in main.ts,
+  // so there is no deployment in which this one runs and that one does not. A
+  // second identical statement here would be a duplicate write against the same
+  // rows twice a tick, buying nothing. If the two loops are ever separated, this
+  // is the comment that has to become a call.
   const tick = async (): Promise<void> => {
     if (running || stopped) return
     running = true

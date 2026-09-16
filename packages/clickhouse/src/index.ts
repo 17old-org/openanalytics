@@ -7,7 +7,6 @@ export {
 } from './migrate.ts'
 
 export {
-  EVENTS_PREVIEW_TABLE,
   EVENTS_RAW_TABLE,
   EVENT_SOURCE_ORIGINS,
   MAX_PROPERTIES_BYTES,
@@ -15,10 +14,8 @@ export {
   foldServerPayload,
   serializeProperties,
   toClickHouseDateTime64,
-  toEventsPreviewRow,
   toEventsRawRow,
   type EventSourceOrigin,
-  type EventsPreviewRow,
   type EventsRawRow,
   type ToEventsRawRowOptions,
 } from './events-raw.ts'
@@ -132,6 +129,7 @@ export {
 
 export {
   DEFAULT_SESSION_REQUEST_TIMEOUT_MS,
+  FACT_ARGMAX_COLUMNS,
   SESSION_FACTS_TABLE,
   SESSION_ROLLUP_1D_TABLE,
   SESSION_ROLLUP_1H_TABLE,
@@ -144,4 +142,5 @@ export {
   type SessionRollupUnit,
   type StoredRollupBucket,
   type StoredSessionFact,
+  type WindowEventsPage,
 } from './session-facts.ts'

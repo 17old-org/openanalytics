@@ -23,6 +23,26 @@ function first(value: string | string[] | undefined): string | null {
   return value ?? null;
 }
 
+/**
+ * `?next=`: where to land after signing in, when somewhere other than the
+ * dashboard sent the person here. Today that is one route: the invite
+ * acceptance page, which puts its own URL (token and all) in `next` so the
+ * sign-in round trip ends back on the invitation instead of on a dashboard
+ * with a "now open the email link again" step.
+ *
+ * Validated here, on the server, before the client ever sees it, because the
+ * value ends up in `router.replace` and in the `callbackURL` handed to the
+ * auth provider: only a same-origin relative path may pass. `//host` is a
+ * scheme-relative URL and `/\host` is the same trick in the one browser
+ * quirk that treats a backslash as a slash; both are refused along with
+ * anything not starting at `/`. An invalid value degrades to the dashboard
+ * rather than to an error, and the person still signs in.
+ */
+function safeNext(value: string | null): string | null {
+  if (value === null) return null;
+  return /^\/(?![/\\])/.test(value) ? value : null;
+}
+
 export default async function LoginPage({
   searchParams,
 }: {
@@ -47,6 +67,7 @@ export default async function LoginPage({
       <ShaderBackdrop />
       <div className="relative">
         <LoginForm
+          next={safeNext(first(params.next))}
           oauthError={first(params.error)}
           oauthErrorDescription={first(params.error_description)}
           verified={first(params.verified) === "1"}

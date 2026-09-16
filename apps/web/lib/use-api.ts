@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { LIVE_API, presentError, type ErrorPresentation } from "@/lib/api";
+import { useRefreshEpoch } from "@/lib/refresh";
 
 export type ApiState<T> =
   | { phase: "loading"; data: null; error: null }
@@ -35,7 +36,11 @@ export function useApi<T>(
 ): ApiState<T> & { reload: () => void } {
   const [attempt, setAttempt] = React.useState(0);
   const [settled, setSettled] = React.useState<Settled<T> | null>(null);
-  const id = `${key}#${attempt}`;
+  // The dashboard-wide refresh pulse joins the request identity beside the
+  // hook's own retry counter: a bump re-fetches this read exactly the way
+  // `reload()` does, without any caller having to know about it.
+  const epoch = useRefreshEpoch();
+  const id = `${key}#${attempt}#${epoch}`;
 
   React.useEffect(() => {
     let cancelled = false;

@@ -62,6 +62,38 @@ export type RevenueWebhookVerification =
   { readonly ok: true } | { readonly ok: false; readonly reason: string }
 
 /**
+ * The delivery's request headers, lowercased, as the route received them.
+ *
+ * Added for the second provider, and it is the one thing that provider cost the
+ * framework. Stripe puts everything an adapter needs in `stripe-signature` and
+ * the event id in the body, so CP2's port could pass a single header string and
+ * `revenue-webhook.ts` could keep a provider→header-name map. **Polar cannot be
+ * served that way**: it signs Standard Webhooks style over three headers, and
+ * its event body carries no id at all — the delivery identity the ledger dedupes
+ * on is the `webhook-id` header. A map of header names cannot express that, and
+ * growing it would mean the transport layer learning each provider's scheme.
+ *
+ * So the whole set travels and the adapter picks, which is the split the port
+ * already draws everywhere else: transport carries bytes, the adapter owns
+ * semantics. The comment in `revenue-webhook.ts` predicted this exact move.
+ *
+ * Values are `undefined` for absent headers rather than the key being missing,
+ * so an adapter reading one it needs gets the same answer either way.
+ */
+export type RevenueWebhookHeaders = Readonly<Record<string, string | undefined>>
+
+/**
+ * What the transport knew about a delivery, beyond its body.
+ *
+ * Optional, and passed to `normalizeEvent` because for some providers the
+ * event's *identity* is not in the event. A backfill has no delivery and passes
+ * nothing; an adapter whose provider puts the id in the body ignores it.
+ */
+export interface RevenueEventContext {
+  readonly headers?: RevenueWebhookHeaders
+}
+
+/**
  * Why an event carried nothing to ingest.
  *
  * Every one of these is ledgered `ignored` and acked with a 200 (D4): the
@@ -202,13 +234,32 @@ export interface RevenueAdapter {
    */
   verifyWebhook(input: {
     readonly rawBody: string
+    /**
+     * One pre-resolved signature header, or `undefined`.
+     *
+     * The CP2 form, kept because a caller that already holds a single header —
+     * a test driving the pipeline directly, a future transport that resolves one
+     * itself — should not have to build a map to say so. The **route no longer
+     * populates it**: it passes `headers` and lets the adapter choose, which is
+     * the whole point of the refactor. An adapter that wants one named header
+     * reads this first and falls back to the set.
+     */
     readonly signatureHeader: string | undefined
+    /**
+     * Every header of the delivery.
+     *
+     * Optional only so that a caller holding a single header stays valid. An
+     * adapter that needs more than one — Polar needs three, and one of them is
+     * the event id — reads this and fails verification when it is absent, which
+     * is the correct direction to fail.
+     */
+    readonly headers?: RevenueWebhookHeaders
     readonly signingSecret: string
     readonly now?: Date
   }): RevenueWebhookVerification
 
   /** The provider's event → zero or more canonical observations (D4's allowlist). */
-  normalizeEvent(parsedEvent: unknown): RevenueNormalizeOutcome
+  normalizeEvent(parsedEvent: unknown, context?: RevenueEventContext): RevenueNormalizeOutcome
 
   /** One page of a list endpoint, for the backfill and the reconcile sweep. */
   listObjects(

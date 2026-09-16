@@ -14,6 +14,7 @@ import Link from "next/link";
 import * as React from "react";
 import {
   BreakdownRow,
+  breakdownShare,
 } from "@/components/dashboard/analytics-card";
 import {
   DEVICE_LABEL,
@@ -647,6 +648,7 @@ function PublicBreakdownCard({
   title,
   rows,
   empty,
+  truncated = false,
 }: {
   icon: React.ReactNode;
   title: string;
@@ -657,9 +659,17 @@ function PublicBreakdownCard({
     icon?: React.ReactNode;
   }> | null;
   empty: string;
+  /** The response's own `meta.truncated`: a share of a capped row set is
+   *  inflated, so the rows render without percentages at all. */
+  truncated?: boolean;
 }) {
-  const max =
-    rows === null ? 1 : Math.max(...rows.map((row) => row.value), 1);
+  // `breakdownShare`, the dashboard's own arithmetic: a share of the TOTAL,
+  // not of the biggest row. Dividing by the max made the top row always read
+  // 100% and everything under it a ratio to it, not a share of traffic.
+  const share = breakdownShare(
+    rows === null ? [] : rows.map((row) => row.value),
+    truncated
+  );
   return (
     <SquircleCard hideSeeAll icon={icon} title={title}>
       <SkeletonReveal
@@ -679,7 +689,7 @@ function PublicBreakdownCard({
                   icon={row.icon}
                   key={row.key}
                   name={row.name}
-                  pct={Math.round((row.value / max) * 100)}
+                  pct={share(row.value)}
                   value={row.value.toLocaleString("en-US")}
                 />
               ))}
@@ -708,6 +718,7 @@ function PublicPagesCard({ pages }: { pages: PublicPagesResponse | null }) {
       icon={<File01Icon aria-hidden="true" />}
       rows={rows}
       title="Top pages"
+      truncated={pages?.meta.truncated ?? false}
     />
   );
 }
@@ -735,6 +746,7 @@ function PublicSourcesCard({
       icon={<Globe02Icon aria-hidden="true" />}
       rows={rows}
       title="Sources"
+      truncated={sources?.meta.truncated ?? false}
     />
   );
 }
@@ -808,6 +820,7 @@ function PublicDeviceCutCard({
       icon={<Icon aria-hidden="true" />}
       rows={rows}
       title={cut.title}
+      truncated={devices?.meta.truncated ?? false}
     />
   );
 }
@@ -919,8 +932,12 @@ function PublicLocationsCard({
       : view === "countries"
         ? foldCountries(items)
         : foldCities(items);
-  const max =
-    places === null ? 1 : Math.max(...places.map((place) => place.visitors), 1);
+  // Share of the total, never of the biggest row (the dashboard's own
+  // `breakdownShare`, same reasoning as `PublicBreakdownCard` above).
+  const share = breakdownShare(
+    places === null ? [] : places.map((place) => place.visitors),
+    geography?.meta.truncated ?? false
+  );
 
   return (
     <SquircleCard
@@ -997,7 +1014,7 @@ function PublicLocationsCard({
                             ? countryName(place.country)
                             : place.label
                         }
-                        pct={Math.round((place.visitors / max) * 100)}
+                        pct={share(place.visitors)}
                         value={place.visitors.toLocaleString("en-US")}
                       />
                     ))}

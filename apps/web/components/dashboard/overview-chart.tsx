@@ -4,6 +4,10 @@ import { useParams } from "next/navigation";
 import * as React from "react";
 import { ApiErrorPanel } from "@/components/dashboard/api-error";
 import {
+  FilteredRangePanel,
+  useAnalyticsFilters,
+} from "@/components/dashboard/filter-context";
+import {
   dataStateOf,
   DataStatePanel,
   ProvenanceChips,
@@ -12,6 +16,10 @@ import {
   useAnalyticsInterval,
   type IntervalKey,
 } from "@/components/dashboard/interval-context";
+import {
+  posterKey,
+  publishPosterSeries,
+} from "@/components/dashboard/overview-poster-store";
 import { Area, AreaChart } from "@/components/charts/area-chart";
 import { Background } from "@/components/charts/background";
 import { ChartTooltip } from "@/components/charts/tooltip";
@@ -328,6 +336,7 @@ export function OverviewChart({
   const params = useParams<{ site: string }>();
   const slug = params.site ? decodeURIComponent(params.site) : "";
   const { range, interval, rangePending } = useAnalyticsInterval();
+  const { filtersParam } = useAnalyticsFilters();
   // Every label on this chart renders in the zone the data was cut in. An
   // unrecognized zone name falls back to the browser's rendering rather
   // than crashing the chart over a label.
@@ -365,9 +374,10 @@ export function OverviewChart({
         ...(wholeHourZone
           ? { resolution: resolutionForInterval(interval, spanMs) }
           : {}),
+        ...(filtersParam !== undefined ? { filters: filtersParam } : {}),
       });
     },
-    [slug, range, interval, rangePending]
+    [slug, range, interval, rangePending, filtersParam]
   );
 
   const resource = useApiResource<ChartTimeseriesResponse>(
@@ -378,7 +388,11 @@ export function OverviewChart({
     if (foldOnError) return null;
     return (
       <div className={`flex items-center justify-center ${PLOT_HEIGHT}`}>
-        <ApiErrorPanel error={resource.error} onRetry={resource.retry} />
+        {resource.error.kind === "filtered_range" ? (
+          <FilteredRangePanel />
+        ) : (
+          <ApiErrorPanel error={resource.error} onRetry={resource.retry} />
+        )}
       </div>
     );
   }
@@ -528,6 +542,15 @@ export function OverviewChart({
 
   return (
     <div className="relative">
+      {/* What was plotted, for the poster: the zero-filled series exactly as
+          drawn, never the raw response. Dashboard only; the share board has
+          no slug and no Share button. */}
+      {loadOverride === undefined && response ? (
+        <PosterSeriesPublisher
+          points={data}
+          posterKey={posterKey(slug, range, filtersParam)}
+        />
+      ) : null}
       {/* Above the plot rather than inside it: the chart fills its card
           edge-to-edge, and a chip laid over the series would sit on data. */}
       {response ? (
@@ -596,4 +619,28 @@ export function OverviewChart({
       </AreaChart>
     </div>
   );
+}
+
+/**
+ * Publishes the plotted visitors to the overview poster store. A component
+ * rather than an effect in `OverviewChart`, because the plotted series only
+ * exists past that function's early returns, and hooks cannot follow it
+ * there. Keyed on the values, so a re-render that plots the same points
+ * publishes nothing.
+ */
+function PosterSeriesPublisher({
+  posterKey: key,
+  points,
+}: {
+  posterKey: string;
+  points: readonly PlotPoint[];
+}) {
+  const signature = points.map((point) => point.visitors).join(",");
+  React.useEffect(() => {
+    publishPosterSeries({
+      key,
+      visitors: signature === "" ? [] : signature.split(",").map(Number),
+    });
+  }, [key, signature]);
+  return null;
 }

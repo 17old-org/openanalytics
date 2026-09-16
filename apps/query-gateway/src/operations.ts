@@ -1,9 +1,16 @@
 import { ApiError, timezoneSchema, utcInstantSchema } from '@openanalytics/contracts'
 import {
   DEFAULT_ANALYTICS_QUERY_CONFIG,
+  FILTER_DIMENSIONS,
+  FILTER_OPERATORS,
+  MAX_FILTER_CLAUSES,
+  MAX_FILTER_VALUES,
+  MAX_FILTER_VALUE_LENGTH,
+  filterValuesFor,
   isUtcDayAligned,
   isUtcHourAligned,
   isUtcMinuteAligned,
+  type AnalyticsFilter,
   type RollupResolution,
 } from '@openanalytics/domain'
 import { z } from 'zod'
@@ -1409,6 +1416,168 @@ const sessionOperations: readonly QueryOperation[] = [
 ]
 
 // ---------------------------------------------------------------------------
+// Entry, exit and bounce per page (ADR-0075, D-E1).
+//
+// Migration `0007_pages_hour_day.sql` states in its own header why the pages
+// rollup excludes these: they are NOT ADDITIVE over an incremental view — a late
+// second pageview has to undo a bounce the view already recorded — and it points
+// at the finalizer as the thing that would make them possible. The finalizer
+// shipped in M8. This is the read that was waiting for it.
+//
+// They come from the session facts and they cannot come from anywhere else.
+// `session_rollups_1h`/`_1d` are keyed `(site_id, bucket_start)` with NO path
+// dimension (migration 0014), and `pages_1h`/`_1d` are event-grain with no
+// session in them. So this operation sits on the same provisional-over-facts
+// layer the session totals sit on, and reads the fact table by the contract
+// migration 0013 mandates:
+//
+//   **argMax over `version` per `(site_id, session_id)` FIRST, then filter
+//   `retracted = 0`.** Filtering `retracted = 0` before the version selection
+//   discards the tombstone and resurrects the stale version underneath it, which
+//   is the exact bug the tombstone exists to prevent.
+//
+// One session contributes two rows — its entry path and its exit path — through
+// a fixed two-element `arrayJoin`. A single-page session contributes both at the
+// same path, which is correct: it entered there and it left there, and
+// `uniqExact` still counts it as one session.
+//
+// **Bounce is derived, never stored twice** (0013's comment on `engaged`), and it
+// is counted on the ENTRY row alone: a bounce is a property of where the visit
+// began. Its denominator is therefore `entrances`, which is returned beside it so
+// a ratio computed anywhere names the number it was divided by.
+//
+// A session with no pageview at all — a visit that fired only a custom event —
+// carries the empty entry/exit path, and the empty path is dropped rather than
+// returned as a row. It is not a page, and the pages report this decorates has no
+// row for it either.
+// ---------------------------------------------------------------------------
+
+function definePageSessions(definition: {
+  id: string
+  source: RollupResolution
+  alignment: RangeAlignment
+  summary: string
+  /**
+   * Whether this variant restricts itself to the sessions a filter set selects
+   * (ADR-0075, D-F1).
+   *
+   * The filter lands INSIDE the fact subquery rather than beside the join,
+   * because here the fact rows are the population being counted — there is no
+   * events_raw side at all — so a filtered entry/exit read needs no raw access
+   * and no session-hint join. It is the one filtered read that is genuinely
+   * cheaper than its unfiltered self.
+   */
+  filtered?: boolean
+}): QueryOperation {
+  const filtered = definition.filtered === true
+  const sql = [
+    'SELECT',
+    '  tupleElement(live.slot, 1) AS page_path,',
+    '  countIf(tupleElement(live.slot, 2) = 1) AS entrances,',
+    '  countIf(tupleElement(live.slot, 3) = 1) AS exits,',
+    '  countIf(tupleElement(live.slot, 2) = 1 AND live.engaged = 0) AS bounces,',
+    // Distinct sessions that entered OR exited at this path, which is what the
+    // two arrayJoin rows of a single-page session must not double.
+    '  uniqExact(live.session_id) AS sessions',
+    'FROM (',
+    '  SELECT',
+    '    cur.session_id AS session_id,',
+    '    cur.engaged AS engaged,',
+    '    arrayJoin([',
+    '      (cur.entry_page_path, toUInt8(1), toUInt8(0)),',
+    '      (cur.exit_page_path, toUInt8(0), toUInt8(1))',
+    '    ]) AS slot',
+    '  FROM (',
+    '    SELECT',
+    '      sfv.session_id AS session_id,',
+    '      argMax(sfv.entry_page_path, sfv.version) AS entry_page_path,',
+    '      argMax(sfv.exit_page_path, sfv.version) AS exit_page_path,',
+    '      argMax(sfv.engaged, sfv.version) AS engaged,',
+    ...(filtered
+      ? FILTER_DIMENSIONS.map(
+          (dimension) => `      argMax(sfv.${dimension}, sfv.version) AS ${dimension},`,
+        )
+      : []),
+    '      argMax(sfv.retracted, sfv.version) AS retracted',
+    '    FROM session_facts_versions AS sfv',
+    '    WHERE sfv.site_id = {site_id:UUID}',
+    "      AND sfv.session_start >= toDateTime64({from:String}, 3, 'UTC')",
+    "      AND sfv.session_start <  toDateTime64({to:String}, 3, 'UTC')",
+    '    GROUP BY sfv.site_id, sfv.session_id',
+    '  ) AS cur',
+    '  WHERE cur.retracted = 0',
+    ...(filtered ? [filterConjuncts('cur').replace(/^ {4}/gm, '  ')] : []),
+    ') AS live',
+    "WHERE tupleElement(live.slot, 1) != ''",
+    'GROUP BY page_path',
+    // Ranked by the two measures together, because the api may cut the merged
+    // list by either one and a list ordered by only one of them would arrive
+    // already missing the top of the other.
+    'ORDER BY entrances + exits DESC',
+    'LIMIT {limit:UInt32}',
+  ].join('\n')
+
+  return defineOperation({
+    id: definition.id,
+    summary: definition.summary,
+    requiresSiteScope: true,
+    // The facts layer is revisable until the finalizer's watermark passes it, so
+    // the short TTL — the same choice, for the same reason, as the provisional
+    // session operations above.
+    cacheProfile: 'default',
+    params: filtered
+      ? filteredParamsSchema({
+          maxRangeMs: Math.min(maxRangeFor[definition.source], FILTERED_MAX_SPAN_MS),
+          alignment: definition.alignment,
+          withTimezone: false,
+          withLimit: true,
+        })
+      : rangeParamsSchema({
+          // Deliberately the pages REPORT's cap rather than a tighter one of its
+          // own: this decorates that report, and a decoration that refuses a
+          // range the report answers would render as missing data on a working
+          // screen.
+          maxRangeMs: maxRangeFor[definition.source],
+          alignment: definition.alignment,
+          // No cutover and no zone. An imported provider day has no session in
+          // it — no entry, no exit, no bounce — so there is nothing on the
+          // imported side of the partition for this to either include or
+          // exclude. Binding the cutover would be a bound value the SQL never
+          // uses, which the definition checker rejects.
+          withTimezone: false,
+          withLimit: true,
+          withImport: false,
+        }),
+    sql,
+    maxRows: TOP_N_MAX,
+    bind: (params: Record<string, unknown>) => ({
+      site_id: params['site_id'] as string,
+      from: toClickHouseInstant(params['from'] as string),
+      to: toClickHouseInstant(params['to'] as string),
+      limit: params['limit'] as number,
+      ...(filtered ? bindFilters(params['filters'] as readonly AnalyticsFilter[]) : {}),
+    }),
+  })
+}
+
+const pageSessionOperations: readonly QueryOperation[] = [
+  definePageSessions({
+    id: 'analytics.page_sessions_hour',
+    source: '1h',
+    alignment: 'hour',
+    summary:
+      'Entrances, exits, bounces and sessions per page path from the session facts. Hour-aligned.',
+  }),
+  definePageSessions({
+    id: 'analytics.page_sessions_day',
+    source: '1d',
+    alignment: 'day',
+    summary:
+      'Entrances, exits, bounces and sessions per page path from the session facts. UTC-day-aligned.',
+  }),
+]
+
+// ---------------------------------------------------------------------------
 // Funnels (docs snapshot 02 §15; plan Milestone 8 item 7, acceptance criterion 4).
 //
 // The one operation family that reads events_raw — §15 computes funnels over the
@@ -2583,6 +2752,572 @@ export const clickhouseRoundtripOperation = defineOperation({
   bind: () => ({}),
 })
 
+// ---------------------------------------------------------------------------
+// Filtered reads (ADR-0075, D-F1 … D-F5).
+//
+// The third family that reads `events_raw`, and it earns the exception the way
+// the funnel and the recent-visitor family earn theirs, which is the only way it
+// may be earned here: a hard site filter, a span capped far below the rollup
+// reports', a row cap, and an aggregate that returns a bounded breakdown rather
+// than rows of events.
+//
+// ## Why a filtered read cannot use a rollup at all
+//
+// Every rollup has already aggregated away the thing a filter selects on.
+// `pages_1h` is `(site, bucket, page_path)`; there is no session in it and no
+// referrer either. `sources_1h` carries a referrer but has no page. A filtered
+// pages report is "the pages viewed by sessions that came from X", and no
+// pre-aggregated table has both halves. So a filter is answered from the facts —
+// and D-F4 is what keeps that cost off everybody else: these operations are
+// ADDITIONAL, the unfiltered ones are untouched, and a dashboard with no chips
+// issues byte-identically the same queries it issued before this family existed.
+//
+// ## The predicate, and why it is still a constant statement (D-F3)
+//
+// No SQL reaches the gateway from the api and no dimension name is ever spliced.
+// The statement carries a fixed block — one conjunct per dimension in
+// `FILTER_DIMENSIONS`, generated at module load — of the shape
+//
+//     AND ({f_country_on:UInt8} = 0 OR has(<values>, cur.country))
+//
+// so an inactive dimension is switched off by a BOUND VALUE rather than by a
+// different statement. Every placeholder is bound on every call, which is what
+// `defineOperation`'s two-directional check demands, and adding a fifth
+// dimension is a data change to `FILTER_DIMENSIONS` plus a column on the fact
+// table — never an edit to a statement.
+//
+// The values arrive as one JSON string per dimension and are read back with
+// `JSONExtract(…, 'Array(String)')`. A JSON string rather than a ClickHouse
+// `Array(String)` parameter because the HTTP reader stringifies every bound
+// value, and hand-rolling ClickHouse's array literal escaping for a city called
+// `N'Djamena` is a bug waiting to be written. `JSON.stringify` already has that
+// rule and both ends already agree on it.
+//
+// ## The join, and the trap it steps around
+//
+// `session_facts_versions.session_id` is the sessionizer's own hash of
+// (site, earliest event id) — migration 0013 — and it is NOT what `events_raw`
+// carries. The raw table's `session_id` is the site-scoped HMAC of the client
+// hint, which the fact table stores as `session_hint`. Joining on the
+// same-named column returns nothing at all, silently, which is the worst
+// possible failure for a filter: an empty report reads as "no traffic from that
+// source" rather than as a bug.
+//
+// So the join is `(er.site_id, er.session_id) IN (SELECT site_id, session_hint …)`.
+//
+// **`anonymous_id` is deliberately NOT part of the key**, and this is a
+// departure worth stating. The fact's `anonymous_id` is the ENTRY event's, and
+// the D-102 identity bridge exists precisely because one visit can span two
+// anonymous ids — a UTC-midnight rotation, a VPN hop, a mobile carrier's CGNAT.
+// Every event after the rotation carries the second id, so a key that included
+// the anonymous id would drop the tail of every bridged session from every
+// filtered report, on mobile traffic above all. The hint alone is safe as an
+// identity: it is minted randomly per browser tab and hashed per site, so two
+// visitors cannot carry the same one — the sessionizer's own header says so, and
+// it is the reason the bridge requires a shared hint in the first place.
+//
+// The residual imprecision is the other direction and is stated rather than
+// hidden: one hint can outlive one session (a tab left open across a 30-minute
+// gap produces two canonical sessions under one hint), so when only one of them
+// matches the filter the other's events are counted too. It is bounded by the
+// range filter and by the 24-hour session cap, and it is smaller than the error
+// that including `anonymous_id` would have caused.
+//
+// ## The session window
+//
+// A session that began before `from` can own events inside the range, so the
+// subquery scans `[from - session cap, to)` rather than `[from, to)`. The cap is
+// ADR-0018's 24 hours, which makes the widening exact rather than generous: a
+// session containing an event at `t` cannot have started before `t - 24h`.
+//
+// ## Events with no session hint
+//
+// The collector writes `session_id: null` when the client sent none — a
+// server-side SDK call, a widget write, any non-tracker producer. Such an event
+// belongs to no canonical session, so no session attribute can select it, and it
+// is outside every filtered read BY CONSTRUCTION rather than by omission. That
+// is the honest reading of D-F1: a filter selects sessions, and an event with no
+// session is in none of them. It is stated in the ADR and in the frontend note
+// so a filtered total that sits below the unfiltered one is read as the rule it
+// is.
+//
+// ## What is imported is not here
+//
+// A staged provider day carries no session, so there is nothing on the imported
+// side of the cutover for a session-scoped filter to include or exclude. A
+// filtered read is live-only by construction, binds no cutover and no run id,
+// and the api marks the response's `data_sources` accordingly.
+// ---------------------------------------------------------------------------
+
+/**
+ * Longest span a filtered read may scan.
+ *
+ * The funnel's cap, deliberately reused rather than invented: it is the bound
+ * this cluster has actually been operated at for a raw, site-scoped, aggregate
+ * read, and it is far below the rollup reports' 400-day and 3660-day ceilings,
+ * which is what D-F5 asks for. A longer filtered range is refused by name in the
+ * api before a query is issued.
+ */
+const FILTERED_MAX_SPAN_MS = 92 * MS_PER_DAY
+
+/** ADR-0018's session cap: how far before `from` a session could have begun. */
+const SESSION_CAP_MS = 24 * MS_PER_HOUR
+
+/** Bounded like the funnel: one row per key, and a hard ceiling on the keys. */
+const FILTERED_TOP_N_MAX = 500
+
+/**
+ * The fixed predicate block: one conjunct per dimension, generated at module
+ * load from the domain's own list so the statement stays a constant.
+ */
+function filterConjuncts(alias: string): string {
+  return FILTER_DIMENSIONS.map(
+    (dimension) =>
+      `    AND ({f_${dimension}_on:UInt8} = 0 OR ` +
+      `has(JSONExtract({f_${dimension}:String}, 'Array(String)'), toString(${alias}.${dimension})))`,
+  ).join('\n')
+}
+
+/**
+ * The session-selection subquery, indented to sit inside an `IN (...)`.
+ *
+ * `argMax` over `version` per `(site_id, session_id)` FIRST and `retracted = 0`
+ * only afterwards, which is migration 0013's read contract and not a style
+ * choice: filtering `retracted = 0` before the version selection discards the
+ * tombstone and resurrects the stale version underneath it, so a retracted
+ * session would be counted — the exact bug the tombstone exists to prevent.
+ */
+const FILTER_SESSION_SUBQUERY = [
+  '  SELECT',
+  '    cur.site_id AS site_id,',
+  // **Every** hint the session carried, not just its entry's (migration 0023).
+  // The sessionizer partitions by resolved identity rather than by hint, so two
+  // tabs of one anonymous visitor are one session with two hints — and on a
+  // production fortnight the entry hint alone found 82% of the page views while
+  // 99% of them had a session under the same anonymous id. `arrayJoin` over the
+  // stored list closes that gap without the range join the alternative needs.
+  //
+  // A session that carried no hint expands to no rows here, which is the honest
+  // answer rather than an omission: it cannot be joined to its events at all,
+  // and a row with an empty hint would match every hintless event on the site.
+  "    arrayJoin(arrayFilter(hint -> hint != '', cur.session_hints)) AS session_hint",
+  '  FROM (',
+  '    SELECT',
+  '      sfv.site_id AS site_id,',
+  '      argMax(sfv.session_hints, sfv.version) AS session_hints,',
+  '      argMax(sfv.referrer_domain, sfv.version) AS referrer_domain,',
+  '      argMax(sfv.country, sfv.version) AS country,',
+  '      argMax(sfv.city, sfv.version) AS city,',
+  '      argMax(sfv.device_type, sfv.version) AS device_type,',
+  '      argMax(sfv.retracted, sfv.version) AS retracted',
+  '    FROM session_facts_versions AS sfv',
+  '    WHERE sfv.site_id = {site_id:UUID}',
+  "      AND sfv.session_start >= toDateTime64({session_from:String}, 3, 'UTC')",
+  "      AND sfv.session_start <  toDateTime64({to:String}, 3, 'UTC')",
+  '    GROUP BY sfv.site_id, sfv.session_id',
+  '  ) AS cur',
+  '  WHERE cur.retracted = 0',
+  filterConjuncts('cur'),
+].join('\n')
+
+/** The events-side WHERE every filtered read shares. */
+function filteredEventFilter(pageviewsOnly: boolean): string {
+  return [
+    'FROM events_raw AS er',
+    'WHERE er.site_id = {site_id:UUID}',
+    "  AND er.occurred_at >= toDateTime64({from:String}, 3, 'UTC')",
+    "  AND er.occurred_at <  toDateTime64({to:String}, 3, 'UTC')",
+    // Every breakdown here mirrors its rollup's own population exactly
+    // (migrations 0007-0010 all read `WHERE type = 'page_view'`), so a filtered
+    // row and an unfiltered row of the same report are the same measure.
+    ...(pageviewsOnly ? ["  AND er.type = 'page_view'"] : []),
+    "  AND er.session_id != ''",
+    '  AND (er.site_id, er.session_id) IN (',
+    FILTER_SESSION_SUBQUERY,
+    '  )',
+  ].join('\n')
+}
+
+/**
+ * The unique-visitor expression, spelled exactly as every rollup spells it.
+ *
+ * `uniqState(if(user_id != '', user_id, anonymous_id))` is what migrations
+ * 0006-0010 store, so this is the same population counted the same way — the
+ * point being that switching a filter on must not also switch the definition of
+ * a visitor.
+ */
+const FILTERED_VISITOR_EXPR = "if(er.user_id != '', er.user_id, er.anonymous_id)"
+
+/** The parameters every filtered operation takes, beyond its own extras. */
+function filteredParamsSchema(options: {
+  maxRangeMs: number
+  alignment: RangeAlignment
+  withTimezone: boolean
+  withLimit: boolean
+}) {
+  const shape: Record<string, z.ZodTypeAny> = {
+    site_id: z.uuid(),
+    from: utcInstantSchema,
+    to: utcInstantSchema,
+    filters: z
+      .array(
+        z.strictObject({
+          dimension: z.enum(FILTER_DIMENSIONS),
+          operator: z.enum(FILTER_OPERATORS),
+          values: z.array(z.string().max(MAX_FILTER_VALUE_LENGTH)).min(1).max(MAX_FILTER_VALUES),
+        }),
+      )
+      .min(1)
+      .max(MAX_FILTER_CLAUSES),
+  }
+  if (options.withTimezone) shape['timezone'] = timezoneSchema
+  if (options.withLimit) {
+    shape['limit'] = z.number().int().min(1).max(FILTERED_TOP_N_MAX).default(TOP_N_DEFAULT)
+  }
+
+  return z
+    .strictObject(shape)
+    .superRefine((value: Record<string, unknown>, ctx: z.RefinementCtx) => {
+      const from = value['from'] as string
+      const to = value['to'] as string
+      const fromMs = Date.parse(from)
+      const toMs = Date.parse(to)
+
+      if (fromMs >= toMs) {
+        ctx.addIssue({ code: 'custom', message: 'range must be half-open with from < to' })
+        return
+      }
+      if (toMs - fromMs > options.maxRangeMs) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `filtered range span exceeds this operation's ${options.maxRangeMs}ms maximum`,
+        })
+      }
+      if (!isAligned(options.alignment, from) || !isAligned(options.alignment, to)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `range endpoints must align to a UTC ${options.alignment} boundary`,
+        })
+      }
+      // D-F4, asserted structurally: an EMPTY filter set may not reach this
+      // family at all. The unfiltered read is a different, cheaper operation on
+      // a rollup, and a caller that sent no chips must never be routed here —
+      // so the operation refuses rather than trusting the router.
+      const filters = value['filters'] as { values: readonly string[] }[]
+      if (!filters.some((filter) => filter.values.length > 0)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'a filtered operation requires at least one filter value; use the rollup read',
+        })
+      }
+    })
+}
+
+/** Binds the fixed per-dimension flag/value pair for every dimension. */
+function bindFilters(filters: readonly AnalyticsFilter[]): Record<string, QueryParameterValue> {
+  const bound: Record<string, QueryParameterValue> = {}
+  for (const dimension of FILTER_DIMENSIONS) {
+    const values = filterValuesFor(filters, dimension)
+    bound[`f_${dimension}_on`] = values.length > 0 ? 1 : 0
+    bound[`f_${dimension}`] = JSON.stringify(values)
+  }
+  return bound
+}
+
+/** The instant the session subquery opens at: `from` minus the session cap. */
+function sessionWindowStart(from: string): string {
+  return toClickHouseInstant(new Date(Date.parse(from) - SESSION_CAP_MS).toISOString())
+}
+
+function defineFilteredReport(definition: {
+  id: string
+  source: RollupResolution
+  alignment: RangeAlignment
+  dimensions: readonly string[]
+  orderBy: string
+  summary: string
+}): QueryOperation {
+  const selectList = [
+    ...definition.dimensions.map((column) => `  er.${column} AS ${column},`),
+    '  count() AS views,',
+    `  uniqExact(${FILTERED_VISITOR_EXPR}) AS visitors`,
+  ]
+  const sql = [
+    'SELECT',
+    ...selectList,
+    filteredEventFilter(true),
+    `GROUP BY ${definition.dimensions.join(', ')}`,
+    `ORDER BY ${definition.orderBy} DESC`,
+    'LIMIT {limit:UInt32}',
+  ].join('\n')
+
+  return defineOperation({
+    id: definition.id,
+    summary: definition.summary,
+    requiresSiteScope: true,
+    allowRawEvents: true,
+    params: filteredParamsSchema({
+      maxRangeMs: Math.min(maxRangeFor[definition.source], FILTERED_MAX_SPAN_MS),
+      alignment: definition.alignment,
+      withTimezone: false,
+      withLimit: true,
+    }),
+    sql,
+    maxRows: FILTERED_TOP_N_MAX,
+    bind: (params: Record<string, unknown>) => ({
+      site_id: params['site_id'] as string,
+      from: toClickHouseInstant(params['from'] as string),
+      to: toClickHouseInstant(params['to'] as string),
+      session_from: sessionWindowStart(params['from'] as string),
+      limit: params['limit'] as number,
+      ...bindFilters(params['filters'] as readonly AnalyticsFilter[]),
+    }),
+  })
+}
+
+const FILTERED_REPORT_SHAPES: readonly {
+  slug: string
+  dimensions: readonly string[]
+  summary: string
+}[] = [
+  { slug: 'pages', dimensions: ['page_path'], summary: 'Top pages' },
+  {
+    slug: 'sources',
+    dimensions: ['referrer_domain', 'utm_source', 'utm_medium', 'utm_campaign'],
+    summary: 'Top acquisition sources',
+  },
+  { slug: 'geography', dimensions: ['country', 'city'], summary: 'Top countries and cities' },
+  {
+    slug: 'devices',
+    dimensions: ['device_type', 'browser', 'os'],
+    summary: 'Top device/browser/OS combinations',
+  },
+]
+
+const filteredReportOperations: readonly QueryOperation[] = FILTERED_REPORT_SHAPES.flatMap(
+  (shape) => [
+    defineFilteredReport({
+      id: `analytics.filtered_${shape.slug}_hour`,
+      source: '1h',
+      alignment: 'hour',
+      dimensions: shape.dimensions,
+      orderBy: 'views',
+      summary: `${shape.summary} for sessions matching a filter set. Hour-aligned.`,
+    }),
+    defineFilteredReport({
+      id: `analytics.filtered_${shape.slug}_day`,
+      source: '1d',
+      alignment: 'day',
+      dimensions: shape.dimensions,
+      orderBy: 'views',
+      summary: `${shape.summary} for sessions matching a filter set. UTC-day-aligned.`,
+    }),
+  ],
+)
+
+function defineFilteredOverview(definition: {
+  id: string
+  source: RollupResolution
+  alignment: RangeAlignment
+  summary: string
+}): QueryOperation {
+  const sql = [
+    'SELECT',
+    '  count() AS events,',
+    "  countIf(er.type = 'page_view') AS pageviews,",
+    '  countIf(er.billable = 1) AS billable_events,',
+    // The `OverviewTotals.visitors` contract sentence (ADR-0036): the range's
+    // visitors are the distinct identities with at least one page view in it,
+    // the population `pageviews` counts. Same rule as the rollup's
+    // `uniqMergeIf(t.visitors, t.event_type = 'page_view')`.
+    `  uniqExactIf(${FILTERED_VISITOR_EXPR}, er.type = 'page_view') AS visitors`,
+    filteredEventFilter(false),
+  ].join('\n')
+
+  return defineOperation({
+    id: definition.id,
+    summary: definition.summary,
+    requiresSiteScope: true,
+    allowRawEvents: true,
+    params: filteredParamsSchema({
+      maxRangeMs: Math.min(maxRangeFor[definition.source], FILTERED_MAX_SPAN_MS),
+      alignment: definition.alignment,
+      withTimezone: false,
+      withLimit: false,
+    }),
+    sql,
+    maxRows: 1,
+    bind: (params: Record<string, unknown>) => ({
+      site_id: params['site_id'] as string,
+      from: toClickHouseInstant(params['from'] as string),
+      to: toClickHouseInstant(params['to'] as string),
+      session_from: sessionWindowStart(params['from'] as string),
+      ...bindFilters(params['filters'] as readonly AnalyticsFilter[]),
+    }),
+  })
+}
+
+function defineFilteredTimeseries(definition: {
+  id: string
+  source: RollupResolution
+  bucketExpr: string
+  alignment: RangeAlignment
+  withTimezone: boolean
+  maxRows: number
+  summary: string
+}): QueryOperation {
+  const sql = [
+    'SELECT',
+    `  ${definition.bucketExpr} AS bucket,`,
+    '  count() AS events,',
+    "  countIf(er.type = 'page_view') AS pageviews,",
+    `  uniqExactIf(${FILTERED_VISITOR_EXPR}, er.type = 'page_view') AS visitors`,
+    filteredEventFilter(false),
+    'GROUP BY bucket',
+    'ORDER BY bucket',
+  ].join('\n')
+
+  return defineOperation({
+    id: definition.id,
+    summary: definition.summary,
+    requiresSiteScope: true,
+    allowRawEvents: true,
+    params: filteredParamsSchema({
+      maxRangeMs: Math.min(maxRangeFor[definition.source], FILTERED_MAX_SPAN_MS),
+      alignment: definition.alignment,
+      withTimezone: definition.withTimezone,
+      withLimit: false,
+    }),
+    sql,
+    maxRows: definition.maxRows,
+    bind: (params: Record<string, unknown>) => ({
+      site_id: params['site_id'] as string,
+      from: toClickHouseInstant(params['from'] as string),
+      to: toClickHouseInstant(params['to'] as string),
+      session_from: sessionWindowStart(params['from'] as string),
+      ...(definition.withTimezone ? { tz: params['timezone'] as string } : {}),
+      ...bindFilters(params['filters'] as readonly AnalyticsFilter[]),
+    }),
+  })
+}
+
+/**
+ * The filtered chart, one operation per grain, named to mirror the unfiltered
+ * family exactly so the api's grain decision is the same decision on both paths.
+ *
+ * Read straight off `occurred_at` rather than off a stored bucket, so the
+ * timezone-local grouping is done once here instead of being composed from hour
+ * buckets — which also means the UTC-day variants exist only to keep the naming
+ * parallel, and are byte-identical in shape to the local ones with `'UTC'`
+ * bound in place of the zone.
+ */
+const filteredTimeseriesOperations: readonly QueryOperation[] = [
+  defineFilteredTimeseries({
+    id: 'analytics.filtered_timeseries_minute',
+    source: '1m',
+    bucketExpr: bucketUtc('toStartOfMinute(er.occurred_at, {tz:String})'),
+    alignment: 'minute',
+    withTimezone: true,
+    maxRows: 3_000,
+    summary: 'Filtered events, pageviews and visitors per timezone-local minute.',
+  }),
+  defineFilteredTimeseries({
+    id: 'analytics.filtered_timeseries_hour',
+    source: '1h',
+    bucketExpr: bucketUtc('toStartOfHour(er.occurred_at, {tz:String})'),
+    alignment: 'hour',
+    withTimezone: true,
+    maxRows: 1_000,
+    summary: 'Filtered events, pageviews and visitors per timezone-local hour.',
+  }),
+  defineFilteredTimeseries({
+    id: 'analytics.filtered_timeseries_day',
+    source: '1h',
+    bucketExpr: bucketUtc('toStartOfDay(er.occurred_at, {tz:String})'),
+    alignment: 'hour',
+    withTimezone: true,
+    maxRows: 500,
+    summary: 'Filtered events, pageviews and visitors per timezone-local day.',
+  }),
+  defineFilteredTimeseries({
+    id: 'analytics.filtered_timeseries_day_utc',
+    source: '1d',
+    bucketExpr: bucketUtc('toStartOfDay(er.occurred_at)'),
+    alignment: 'day',
+    withTimezone: false,
+    maxRows: 500,
+    summary: 'Filtered events, pageviews and visitors per UTC day.',
+  }),
+  defineFilteredTimeseries({
+    id: 'analytics.filtered_timeseries_week',
+    source: '1h',
+    bucketExpr: bucketUtc('toDateTime(toStartOfWeek(er.occurred_at, 1, {tz:String}), {tz:String})'),
+    alignment: 'hour',
+    withTimezone: true,
+    maxRows: 600,
+    summary: 'Filtered events, pageviews and visitors per timezone-local ISO week.',
+  }),
+  defineFilteredTimeseries({
+    id: 'analytics.filtered_timeseries_week_utc',
+    source: '1d',
+    bucketExpr: "toDateTime64(toStartOfWeek(er.occurred_at, 1), 3, 'UTC')",
+    alignment: 'day',
+    withTimezone: false,
+    maxRows: 600,
+    summary: 'Filtered events, pageviews and visitors per ISO week in UTC.',
+  }),
+]
+
+const filteredOverviewOperations: readonly QueryOperation[] = [
+  defineFilteredOverview({
+    id: 'analytics.filtered_overview_hour',
+    source: '1h',
+    alignment: 'hour',
+    summary: 'Filtered range totals — events, pageviews, billable events, visitors. Hour-aligned.',
+  }),
+  defineFilteredOverview({
+    id: 'analytics.filtered_overview_day',
+    source: '1d',
+    alignment: 'day',
+    summary: 'Filtered range totals. UTC-day-aligned.',
+  }),
+]
+
+/**
+ * The filtered twin of the entry/exit decoration.
+ *
+ * It exists so a filtered pages screen is coherent rather than half-filtered:
+ * without it the `views` column would answer "for the filtered sessions" while
+ * the `entrances` beside it answered "for all of them", on one row, with nothing
+ * to tell them apart. Two numbers in one table that quietly mean different
+ * things is the failure mode this whole family is built to avoid.
+ */
+const filteredPageSessionOperations: readonly QueryOperation[] = [
+  definePageSessions({
+    id: 'analytics.filtered_page_sessions_hour',
+    source: '1h',
+    alignment: 'hour',
+    filtered: true,
+    summary:
+      'Entrances, exits, bounces and sessions per page path for sessions matching a filter set. Hour-aligned.',
+  }),
+  definePageSessions({
+    id: 'analytics.filtered_page_sessions_day',
+    source: '1d',
+    alignment: 'day',
+    filtered: true,
+    summary:
+      'Entrances, exits, bounces and sessions per page path for sessions matching a filter set. UTC-day-aligned.',
+  }),
+]
+
+const filteredOperations: readonly QueryOperation[] = [
+  ...filteredOverviewOperations,
+  ...filteredTimeseriesOperations,
+  ...filteredReportOperations,
+  ...filteredPageSessionOperations,
+]
+
 const OPERATIONS: readonly QueryOperation[] = [
   clickhouseRoundtripOperation,
   ...timeseriesOperations,
@@ -2591,8 +3326,10 @@ const OPERATIONS: readonly QueryOperation[] = [
   ...customEventSampleOperations,
   ...importedReportOperations,
   ...sessionOperations,
+  ...pageSessionOperations,
   ...funnelOperations,
   ...recentVisitorOperations,
+  ...filteredOperations,
   ...revenueOperations,
   freshnessOperation,
 ]

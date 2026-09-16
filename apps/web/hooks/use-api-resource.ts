@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import * as React from "react";
 import { isUnauthenticated, presentError, type ErrorPresentation } from "@/lib/api";
+import { useRefreshEpoch } from "@/lib/refresh";
 
 /**
  * One `/v1` read, with the three states every screen has to design for.
@@ -29,13 +30,16 @@ export function useApiResource<T>(
 ): ApiResource<T> {
   const router = useRouter();
   const [attempt, setAttempt] = React.useState(0);
+  // The dashboard-wide refresh pulse: part of the request identity, so a
+  // bump re-runs this read the way `retry()` does, for every mounted hook.
+  const epoch = useRefreshEpoch();
 
   // One identity per in-flight request. Results are tagged with the token they
   // were fetched under, so a stale answer cannot paint over a newer request and
   // "loading" is derived rather than assigned — no setState in the effect body.
   const token = React.useMemo(
-    () => ({ load, attempt }),
-    [load, attempt]
+    () => ({ load, attempt, epoch }),
+    [load, attempt, epoch]
   );
   const [settled, setSettled] = React.useState<{
     token: unknown;

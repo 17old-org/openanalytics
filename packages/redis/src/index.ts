@@ -157,6 +157,7 @@ export {
 
 export {
   createQueueMaintenance,
+  infoFieldValue,
   lastDeliveredIdFor,
   minIdFor,
   safeTrimMinId,

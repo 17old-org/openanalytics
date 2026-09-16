@@ -43,6 +43,7 @@ function storedFrom(
     userId: session.userId,
     anonymousId: session.anonymousId,
     sessionHint: session.sessionHint,
+    sessionHints: session.sessionHints,
     midnightBridged: session.midnightBridged ? 1 : 0,
     pageviews: session.pageviews,
     engaged: session.engaged ? 1 : 0,
@@ -60,6 +61,7 @@ function storedFrom(
     browser: session.browser,
     os: session.os,
     country: session.country,
+    city: opts.preExtension === true ? '' : session.city,
     finalized: opts.finalized ? 1 : 0,
     retracted: opts.retracted ? 1 : 0,
   }

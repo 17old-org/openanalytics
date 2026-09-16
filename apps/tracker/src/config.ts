@@ -35,8 +35,30 @@ const CONFIG_KEY = 'oa.config'
  */
 export const CONFIG_CACHE_TTL_MS = 5 * 60 * 1000
 
+/**
+ * How long a `404` on the config endpoint silences this browser (ADR-0074).
+ *
+ * A 404 there has exactly one meaning — no live site matches the key: the site
+ * was deleted, or its tracking key was expired by an operator block. Unknown,
+ * revoked and expired are deliberately indistinguishable on the wire, and the
+ * tracker needs no distinction either: in every one of those states each event
+ * it sends will be refused, so sending is only load. The first large blocked
+ * customer kept ~66 requests/second of refused batches coming for days, enough
+ * to OOM the edge proxy — the fix is that the tracker itself stands down.
+ *
+ * One hour, matching the `oa.js` asset cache: after a block, a visitor costs at
+ * most one config probe per hour instead of a batch per pageview. Kept finite so
+ * a site that comes back — a key rotation, an unblock, a config-store blip that
+ * answered 404 for a moment — resumes within the hour on its own.
+ */
+export const SITE_GONE_TTL_MS = 60 * 60 * 1000
+
+/** The whole configuration a gone site needs: send nothing. */
+const DISABLED_PATCH: TrackerConfigPatch = { disabled: true }
+
 interface TrackerConfigResponse {
   config_version?: number
+  collection_paused?: boolean
   redact_query_keys?: string[]
   interaction_sampling?: number
   heartbeat_interval_seconds?: number
@@ -49,6 +71,8 @@ interface CachedConfig {
   etag: string | null
   at: number
   body: TrackerConfigResponse
+  /** Set when the last answer was a 404: no live site matches the key. */
+  gone?: true
 }
 
 export function toRuntimeConfig(response: TrackerConfigResponse): TrackerConfigPatch {
@@ -99,7 +123,15 @@ export function toRuntimeConfig(response: TrackerConfigResponse): TrackerConfigP
     }
   }
 
-  return runtime as TrackerConfigPatch
+  return {
+    ...runtime,
+    // Set on every response, in both directions (ADR-0074, amendment 2): the
+    // paused light must clear the moment a configuration without it arrives,
+    // and "absent means leave it alone" — the rule for every other field —
+    // would leave a tracker paused after the window reopened. The server only
+    // emits `true`; absence IS the resume signal.
+    disabled: response.collection_paused === true,
+  } as TrackerConfigPatch
 }
 
 export interface ConfigLoaderDeps {
@@ -108,15 +140,6 @@ export interface ConfigLoaderDeps {
   readonly storage: SafeStorage
   readonly now: () => number
   readonly fetchImpl?: (url: string, init: RequestInit) => Promise<Response>
-  /**
-   * A rule-preview token from the page URL (ADR-0034, D6).
-   *
-   * Its presence changes three things: the request carries it, the response is
-   * this page's *draft* rules rather than the published set, and nothing is read
-   * from or written to the local cache. A preview must not displace the real
-   * configuration for the next ordinary page load.
-   */
-  readonly previewToken?: string | undefined
 }
 
 function readCache(storage: SafeStorage): CachedConfig | null {
@@ -133,13 +156,29 @@ function readCache(storage: SafeStorage): CachedConfig | null {
   return null
 }
 
+/**
+ * Whether a fresh gone-marker says this site has no live key (ADR-0074).
+ *
+ * Synchronous on purpose: the boot path asks before installing anything, so a
+ * page on a blocked site arms no listeners, starts no timers and opens no
+ * connection. Past the TTL the answer flips back to `false` and the ordinary
+ * boot re-probes.
+ */
+export function isSiteGone(storage: SafeStorage, nowMs: number): boolean {
+  const cached = readCache(storage)
+  return cached?.gone === true && nowMs - cached.at < SITE_GONE_TTL_MS
+}
+
 export async function loadTrackerConfig(
   deps: ConfigLoaderDeps,
 ): Promise<TrackerConfigPatch | null> {
-  const preview = deps.previewToken
-  const cached = preview ? null : readCache(deps.storage)
+  const cached = readCache(deps.storage)
 
-  if (cached && deps.now() - cached.at < CONFIG_CACHE_TTL_MS) {
+  if (cached?.gone === true) {
+    // Its own, longer TTL: a gone site's browsers should probe hourly, not
+    // every five minutes. A stale marker falls through to the fetch below.
+    if (deps.now() - cached.at < SITE_GONE_TTL_MS) return DISABLED_PATCH
+  } else if (cached && deps.now() - cached.at < CONFIG_CACHE_TTL_MS) {
     return toRuntimeConfig(cached.body)
   }
 
@@ -148,7 +187,7 @@ export async function loadTrackerConfig(
 
   const url = `${deps.collectorUrl.replace(/\/+$/, '')}/v1/tracker/config?key=${encodeURIComponent(
     deps.trackingKey,
-  )}${preview ? `&preview=${encodeURIComponent(preview)}` : ''}`
+  )}`
 
   try {
     const response = await fetchImpl(url, {
@@ -163,19 +202,25 @@ export async function loadTrackerConfig(
       return toRuntimeConfig(cached.body)
     }
 
+    // 404 is the one failure with a defined meaning — `SITE_NOT_FOUND`, the
+    // endpoint's only 404 — and the one that must not fall back to the last
+    // known good configuration: that configuration is what keeps a dead site
+    // sending. Arm the marker and stand down (ADR-0074).
+    if (response.status === 404) {
+      deps.storage.set(
+        CONFIG_KEY,
+        JSON.stringify({ etag: null, at: deps.now(), body: {}, gone: true } satisfies CachedConfig),
+      )
+      return DISABLED_PATCH
+    }
+
     if (!response.ok) return cached ? toRuntimeConfig(cached.body) : null
 
     const body = (await response.json()) as TrackerConfigResponse
-    // A preview is never cached, at any layer — the server says `no-store` and
-    // this is the other half of it. A draft rule set written here would be
-    // served to the next ordinary page load from localStorage, long after the
-    // preview session ended.
-    if (!preview) {
-      deps.storage.set(
-        CONFIG_KEY,
-        JSON.stringify({ etag: response.headers.get('etag'), at: deps.now(), body }),
-      )
-    }
+    deps.storage.set(
+      CONFIG_KEY,
+      JSON.stringify({ etag: response.headers.get('etag'), at: deps.now(), body }),
+    )
     return toRuntimeConfig(body)
   } catch {
     // Offline, blocked or malformed: the tracker keeps working on defaults or

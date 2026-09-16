@@ -121,6 +121,10 @@ vi.mock('@openanalytics/postgres', async (importOriginal) => {
         ok: true,
         credential: credential({
           id: input['id'] as string,
+          // Echoed rather than defaulted: the response's webhook address is
+          // built from the stored row's provider, so a mock that hardcoded one
+          // would have reported a Stripe URL for a Polar connection.
+          provider: input['provider'] as string,
           webhookToken: input['webhookToken'] as string,
           apiKeyLast4: input['apiKeyLast4'] as string,
           // Null when the connect carried no signing secret — step one of two.
@@ -164,6 +168,18 @@ const adapter: RevenueAdapter = fakeRevenueAdapter({
   },
 })
 
+/** The second available provider, so the connect path is exercised for a
+ * provider whose id is not the one every other assertion here uses. */
+const polarAdapter: RevenueAdapter = fakeRevenueAdapter({
+  providerId: 'polar',
+  verifyCredential: async (secretKey) => {
+    calls.probed.push(secretKey)
+    await Promise.resolve()
+    if (world.probe === 'ok') return { outcome: 'ok' }
+    return { outcome: world.probe, detail: `polar responded ${world.probe}` }
+  },
+})
+
 const vault = createCredentialVault(
   JSON.stringify({ active: 'k1', keys: { k1: randomBytes(32).toString('base64') } }),
 )
@@ -201,7 +217,7 @@ const app = createApp({
   env,
   auth,
   db,
-  revenue: { vault, adapters: createRevenueAdapterRegistry([adapter]) },
+  revenue: { vault, adapters: createRevenueAdapterRegistry([adapter, polarAdapter]) },
 })
 
 /** A second app with no keyring: the fail-closed mount. */
@@ -217,7 +233,7 @@ const slashedApp = createApp({
   env: loadServiceEnv('api', testEnv({ AUTH_BASE_URL: 'https://api.example.test/' })),
   auth,
   db,
-  revenue: { vault, adapters: createRevenueAdapterRegistry([adapter]) },
+  revenue: { vault, adapters: createRevenueAdapterRegistry([adapter, polarAdapter]) },
 })
 
 const fallbackCapture = createCapturedLogger()
@@ -227,7 +243,7 @@ const fallbackApp = createApp({
   env: loadServiceEnv('api', testEnv()),
   auth,
   db,
-  revenue: { vault, adapters: createRevenueAdapterRegistry([adapter]) },
+  revenue: { vault, adapters: createRevenueAdapterRegistry([adapter, polarAdapter]) },
 })
 
 const call = (
@@ -290,7 +306,10 @@ describe('GET /v1/revenue/providers', () => {
       'creem',
       'dodo',
     ])
-    expect(body.items.filter((item) => item.available).map((item) => item.id)).toEqual(['stripe'])
+    expect(body.items.filter((item) => item.available).map((item) => item.id)).toEqual([
+      'stripe',
+      'polar',
+    ])
     expect(body.items[0]).toEqual({ id: 'stripe', display_name: 'Stripe', available: true })
   })
 
@@ -488,9 +507,25 @@ describe('POST — connect', () => {
     expect(JSON.parse(text)['api_key_last4']).toBe('1234')
   })
 
+  it('connects the SECOND provider, which is the whole claim of the flip', async () => {
+    // Polar moved from `available: false` to `available: true` in the catalog
+    // and gained an adapter in both composition roots. Nothing else about this
+    // route changed — the same probe, the same AAD, the same stored shape — and
+    // that is the point: a second provider is a descriptor and an adapter.
+    const res = await connect({ ...validBody, provider: 'polar' })
+    expect(res.status).toBe(201)
+    expect(calls.probed).toEqual([API_KEY])
+    expect(calls.created[0]).toMatchObject({ provider: 'polar' })
+
+    // The webhook address is per provider, so a customer pasting it into Polar
+    // cannot land on the Stripe adapter.
+    const body = (await res.json()) as Record<string, unknown>
+    expect(body['webhook_url']).toContain('/v1/revenue/webhooks/polar/')
+  })
+
   it.each([
     ['an unknown provider', { ...validBody, provider: 'not-a-provider' }, 'unknown'],
-    ['a provider with no adapter yet', { ...validBody, provider: 'polar' }, 'unavailable'],
+    ['a provider with no adapter yet', { ...validBody, provider: 'paddle' }, 'unavailable'],
   ])('refuses %s before it can reach a provider', async (_label, body, code) => {
     const res = await connect(body)
     expect(res.status).toBe(400)

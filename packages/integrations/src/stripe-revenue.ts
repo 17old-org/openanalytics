@@ -686,7 +686,14 @@ export function createStripeRevenueAdapter(fetchImpl: typeof fetch = fetch): Rev
     verifyWebhook(input): RevenueWebhookVerification {
       const verified = verifyStripeSignature({
         rawBody: input.rawBody,
-        header: input.signatureHeader,
+        // The pre-resolved header when a caller had one, else this adapter's own
+        // header out of the delivery's full set. The route stopped resolving
+        // header names when the second provider landed — Polar's signature needs
+        // three headers and its event id is one of them, which a provider→name
+        // map cannot express — so the set is now what arrives and picking from
+        // it is the adapter's job. Byte-identical either way: the same string
+        // reaches the same verifier.
+        header: input.signatureHeader ?? input.headers?.['stripe-signature'],
         secret: input.signingSecret,
         ...(input.now === undefined ? {} : { now: input.now }),
       })
