@@ -3,7 +3,38 @@
 This repository is the 17old-org fork of
 [OpenLabs-so/openanalytics](https://github.com/OpenLabs-so/openanalytics),
 tracked from upstream. The deployment baseline is the upstream release tag
-`v0.4.2`; do not deploy a floating `main` commit as though it were a release.
+`v0.6.0` (upgraded from `v0.4.2` on 2026-09-16); do not deploy a floating
+`main` commit as though it were a release.
+
+## Live deployment (2026-09-16)
+
+Zeabur project `l7old-openanalytics` (`6a801ecebdeaa87e2c52507b`), environment
+`production`, server `Tencent 8GB for 17old`. Ten services run
+`ghcr.io/openlabs-so/openanalytics/<svc>:v0.6.0`; PostgreSQL runs the upstream
+`postgres:17-alpine`. Four hostnames are live: `app.`, `c.`, `rt.` and `api.`
+under `analytics.17-old.org`.
+
+### Sendflare is NOT in production
+
+The worker carries an `EMAIL_FROM` and a `SENDFLARE_API_KEY` variable, but it
+runs the **upstream** worker image, which never reads `SENDFLARE_API_KEY` —
+that transport exists only in this fork. Magic-link mail therefore falls
+through to Resend, SMTP or the log transport, whichever is configured.
+
+Putting Sendflare live needs the fork image
+`ghcr.io/17old-org/openanalytics/worker:sendflare`, which is built by the
+manual `ci.yml` dispatch on `agent/zeabur-selfhost-setup`. That image sits in a
+**private** GHCR package while `17old-org/openanalytics` itself is public, so
+Zeabur cannot pull it. Two ways out, both needing a human decision:
+
+1. Make the `openanalytics/worker` package public — the source is already
+   public and AGPLv3, so this exposes nothing new.
+2. Give Zeabur GHCR pull credentials in the service's Source dialog.
+
+A third route exists and needs no registry at all: point the worker service at
+the public GitHub repository instead of an image. `infra/docker/node-app.Dockerfile`
+already defaults to `ARG APP=worker` precisely so a platform that builds the
+file directly picks the worker.
 
 ## Decision recorded before a server is purchased
 
