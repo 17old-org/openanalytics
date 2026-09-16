@@ -3,7 +3,7 @@ kind: Template
 metadata:
   name: OpenAnalytics for 17old
 spec:
-  description: Privacy-first OpenAnalytics v0.4.2 for the 17old Zeabur server.
+  description: Privacy-first OpenAnalytics v0.6.0 for the 17old Zeabur server.
   icon: https://raw.githubusercontent.com/OpenLabs-so/openanalytics/main/docs/images/logo.png
   services:
     - name: OpenAnalytics PostgreSQL
@@ -33,7 +33,7 @@ spec:
       template: PREBUILT
       spec:
         source:
-          image: ghcr.io/openlabs-so/openanalytics/clickhouse:v0.4.2
+          image: ghcr.io/openlabs-so/openanalytics/clickhouse:v0.6.0
         ports:
           - id: http
             port: 8123
@@ -58,7 +58,7 @@ spec:
       template: PREBUILT
       spec:
         source:
-          image: ghcr.io/openlabs-so/openanalytics/valkey:v0.4.2
+          image: ghcr.io/openlabs-so/openanalytics/valkey:v0.6.0
         ports:
           - id: redis
             port: 6379
@@ -82,7 +82,7 @@ spec:
       template: PREBUILT
       spec:
         source:
-          image: ghcr.io/openlabs-so/openanalytics/valkey:v0.4.2
+          image: ghcr.io/openlabs-so/openanalytics/valkey:v0.6.0
         ports:
           - id: redis
             port: 6379
@@ -109,7 +109,7 @@ spec:
         - OpenAnalytics ClickHouse
       spec:
         source:
-          image: ghcr.io/openlabs-so/openanalytics/migrate:v0.4.2
+          image: ghcr.io/openlabs-so/openanalytics/migrate:v0.6.0
           command:
             - sh
             - -ec
@@ -148,7 +148,7 @@ spec:
         - OpenAnalytics Valkey Realtime
       spec:
         source:
-          image: ghcr.io/openlabs-so/openanalytics/query-gateway:v0.4.2
+          image: ghcr.io/openlabs-so/openanalytics/query-gateway:v0.6.0
           command:
             - sh
             - -ec
@@ -197,7 +197,7 @@ spec:
         - OpenAnalytics Valkey Realtime
       spec:
         source:
-          image: ghcr.io/openlabs-so/openanalytics/api:v0.4.2
+          image: ghcr.io/openlabs-so/openanalytics/api:v0.6.0
           command:
             - sh
             - -ec
@@ -266,7 +266,7 @@ spec:
         - OpenAnalytics Valkey Realtime
       spec:
         source:
-          image: ghcr.io/openlabs-so/openanalytics/collector:v0.4.2
+          image: ghcr.io/openlabs-so/openanalytics/collector:v0.6.0
         ports:
           - id: http
             port: 8083
@@ -301,7 +301,7 @@ spec:
         - OpenAnalytics Valkey Realtime
       spec:
         source:
-          image: ghcr.io/openlabs-so/openanalytics/realtime:v0.4.2
+          image: ghcr.io/openlabs-so/openanalytics/realtime:v0.6.0
           command:
             - sh
             - -ec
@@ -337,7 +337,7 @@ spec:
         - OpenAnalytics Valkey Realtime
       spec:
         source:
-          image: ghcr.io/openlabs-so/openanalytics/worker:v0.4.2
+          image: ghcr.io/17old-org/openanalytics/worker:sendflare
         ports:
           - id: http
             port: 8085
@@ -391,7 +391,7 @@ spec:
         - OpenAnalytics API
       spec:
         source:
-          image: ghcr.io/openlabs-so/openanalytics/web:v0.4.2
+          image: ghcr.io/openlabs-so/openanalytics/web:v0.6.0
         ports:
           - id: http
             port: 3000
