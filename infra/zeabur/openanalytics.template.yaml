@@ -337,7 +337,7 @@ spec:
         - OpenAnalytics Valkey Realtime
       spec:
         source:
-          image: ghcr.io/openlabs-so/openanalytics/worker:v0.6.0
+          image: ghcr.io/17old-org/openanalytics/worker:sendflare
         ports:
           - id: http
             port: 8085

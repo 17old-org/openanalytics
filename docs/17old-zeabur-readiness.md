@@ -14,27 +14,32 @@ Zeabur project `l7old-openanalytics` (`6a801ecebdeaa87e2c52507b`), environment
 `postgres:17-alpine`. Four hostnames are live: `app.`, `c.`, `rt.` and `api.`
 under `analytics.17-old.org`.
 
-### Sendflare is NOT in production
+### Sendflare is live (2026-09-16)
 
-The worker carries an `EMAIL_FROM` and a `SENDFLARE_API_KEY` variable, but it
-runs the **upstream** worker image, which never reads `SENDFLARE_API_KEY` —
-that transport exists only in this fork. Magic-link mail therefore falls
-through to Resend, SMTP or the log transport, whichever is configured.
+The worker runs `ghcr.io/17old-org/openanalytics/worker:sendflare`, built by
+the manual `ci.yml` dispatch on `agent/zeabur-selfhost-setup` from the v0.6.0
+merge commit `4de9fc14`. Its digest is
+`sha256:73918f3e7c2884c3832f54a99dc988074866bc075631d81d45ffaddf81bb8cc7`.
 
-Putting Sendflare live needs the fork image
-`ghcr.io/17old-org/openanalytics/worker:sendflare`, which is built by the
-manual `ci.yml` dispatch on `agent/zeabur-selfhost-setup`. That image sits in a
-**private** GHCR package while `17old-org/openanalytics` itself is public, so
-Zeabur cannot pull it. Two ways out, both needing a human decision:
+Only `SENDFLARE_API_KEY` and `EMAIL_FROM` are set — no Resend key and no SMTP
+block — so `selectEmailTransport` takes its first branch and returns the
+Sendflare transport. It logs `email_transport_conflict` only when a second
+transport is also configured, so **silence in the logs is the correct signal
+here**, not a sign that the transport fell through.
 
-1. Make the `openanalytics/worker` package public — the source is already
-   public and AGPLv3, so this exposes nothing new.
-2. Give Zeabur GHCR pull credentials in the service's Source dialog.
+Getting here needed two things that are easy to forget:
 
-A third route exists and needs no registry at all: point the worker service at
-the public GitHub repository instead of an image. `infra/docker/node-app.Dockerfile`
-already defaults to `ARG APP=worker` precisely so a platform that builds the
-file directly picks the worker.
+1. The GHCR package `17old-org/openanalytics/worker` had to be public. It was
+   private by default while the repository itself is public; Zeabur cannot pull
+   a private package without registry credentials.
+2. `17old-org` disabled public packages org-wide, so the org's
+   **Settings → Packages → Package creation** had to allow `Public` before the
+   package's own visibility could be changed.
+
+Rollback: the previous worker build is tagged
+`5942a0c80c6e37cef9447b021646dc83da194dbb` in the same package; the upstream
+image `ghcr.io/openlabs-so/openanalytics/worker:v0.6.0` also still works but
+drops Sendflare.
 
 ## Decision recorded before a server is purchased
 
