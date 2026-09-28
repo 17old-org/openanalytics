@@ -31,7 +31,22 @@ import { requireCapability, siteMembership, type ApiVariables } from './middlewa
 
 type Env = { Variables: ApiVariables }
 
-function funnelJson(funnel: FunnelDefinition) {
+/** A stored definition as the API spells it (`FunnelDefinition` in the spec). */
+export interface FunnelJson {
+  readonly id: string
+  readonly name: string
+  readonly steps: readonly string[]
+  readonly scope: FunnelDefinition['scope']
+  readonly window_ms: number
+  readonly created_by_user_id: string | null
+  readonly created_at: string
+  readonly updated_at: string
+  readonly archived_at: string | null
+}
+
+/** Shared with the key-authenticated funnel read, so a definition looks the
+ * same through every door. */
+export function funnelJson(funnel: FunnelDefinition): FunnelJson {
   return {
     id: funnel.id,
     name: funnel.name,

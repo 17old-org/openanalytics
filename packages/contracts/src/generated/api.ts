@@ -1774,6 +1774,146 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/read/analytics/custom-events": {
+        parameters: {
+            query: {
+                /** @description Half-open range start, ISO-8601 UTC. */
+                from: components["parameters"]["RangeFrom"];
+                /** @description Half-open range end (exclusive), ISO-8601 UTC. */
+                to: components["parameters"]["RangeTo"];
+                /** @description IANA timezone the calendar boundaries are expressed in. */
+                timezone: components["parameters"]["QueryTimezone"];
+                /** @description Maximum rows to return for a top-N report. */
+                limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description Omit for range totals only. `day` adds `days`: the same report once per
+                 *     calendar day in the request's `timezone`, each day computed as its own
+                 *     dashboard read. Unique visitors therefore do not add across days — a
+                 *     visitor seen on two days counts on both days and once in the totals.
+                 *
+                 *     A daily breakdown covers at most 31 days; a wider range is
+                 *     `400 RANGE_TOO_LARGE`, refused before any query runs.
+                 */
+                breakdown?: components["parameters"]["CustomEventsBreakdown"];
+            };
+            header?: {
+                /**
+                 * @description Which site this request is about (ADR-0043, D3).
+                 *
+                 *     **Required with an OAuth token, refused with a private key**, and neither
+                 *     is a technicality:
+                 *
+                 *     - A token belongs to a *person* with several sites, so the request has to
+                 *       say which one. Omitted, `400 VALIDATION_FAILED` naming this header —
+                 *       there is no "your first site" default, because a CLI that silently
+                 *       reports on the wrong site is worse than one that asks.
+                 *     - A key *is* a site. Sending this with a key is `400 VALIDATION_FAILED`
+                 *       rather than being ignored: a caller that names a site is asserting
+                 *       something, and one that agrees by accident today would disagree
+                 *       tomorrow when somebody points the plugin at the wrong site.
+                 *
+                 *     The site is authorized **per request, from live membership**, not from a
+                 *     grant frozen at consent time. So a user removed from a site loses it on
+                 *     their very next request, with no token revocation and no new mechanism —
+                 *     and a site they were never in answers `SITE_NOT_FOUND`, the same answer a
+                 *     malformed id gets, so the two stay indistinguishable.
+                 *
+                 *     A header rather than a query parameter so it never mixes with the
+                 *     analytics parameters these routes already parse, and so the same URL
+                 *     means the same query for both credential kinds.
+                 */
+                "X-OA-Site"?: components["parameters"]["SiteSelector"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Events, billable events and unique visitors per custom event name.
+         * @description The dashboard's Custom events report through a key or a token: the same
+         *     service method and the same labels, so the counts, `display_name` and
+         *     `display_template` are what the dashboard shows (null for an event with
+         *     no definition). Unfiltered, as on the dashboard. Each row is the
+         *     aggregate only — the dashboard's per-event sample is not served here.
+         *
+         *     `breakdown=day` adds one row set per calendar day under `days`.
+         *
+         *     Requires the `analytics:read` scope.
+         */
+        get: operations["readAnalyticsCustomEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/read/analytics/funnels/{funnel_id}": {
+        parameters: {
+            query: {
+                /** @description Half-open range start, ISO-8601 UTC. */
+                from: components["parameters"]["RangeFrom"];
+                /** @description Half-open range end (exclusive), ISO-8601 UTC. */
+                to: components["parameters"]["RangeTo"];
+                /** @description IANA timezone the calendar boundaries are expressed in. */
+                timezone: components["parameters"]["QueryTimezone"];
+            };
+            header?: {
+                /**
+                 * @description Which site this request is about (ADR-0043, D3).
+                 *
+                 *     **Required with an OAuth token, refused with a private key**, and neither
+                 *     is a technicality:
+                 *
+                 *     - A token belongs to a *person* with several sites, so the request has to
+                 *       say which one. Omitted, `400 VALIDATION_FAILED` naming this header —
+                 *       there is no "your first site" default, because a CLI that silently
+                 *       reports on the wrong site is worse than one that asks.
+                 *     - A key *is* a site. Sending this with a key is `400 VALIDATION_FAILED`
+                 *       rather than being ignored: a caller that names a site is asserting
+                 *       something, and one that agrees by accident today would disagree
+                 *       tomorrow when somebody points the plugin at the wrong site.
+                 *
+                 *     The site is authorized **per request, from live membership**, not from a
+                 *     grant frozen at consent time. So a user removed from a site loses it on
+                 *     their very next request, with no token revocation and no new mechanism —
+                 *     and a site they were never in answers `SITE_NOT_FOUND`, the same answer a
+                 *     malformed id gets, so the two stay indistinguishable.
+                 *
+                 *     A header rather than a query parameter so it never mixes with the
+                 *     analytics parameters these routes already parse, and so the same URL
+                 *     means the same query for both credential kinds.
+                 */
+                "X-OA-Site"?: components["parameters"]["SiteSelector"];
+            };
+            path: {
+                /** @description A saved funnel on the selected site, as the site's funnel list returns it. */
+                funnel_id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * One saved funnel's step counts and conversion over a range.
+         * @description Runs the stored definition — its steps, scope and window — through the
+         *     same computation as the dashboard's Funnels screen; only the range comes
+         *     from the caller. The definition is returned beside the counts. An
+         *     archived funnel still runs.
+         *
+         *     The funnel is looked up on the selected site only: an id from another
+         *     site, and an id that is not one at all, are both `404 NOT_FOUND`. A
+         *     funnel covers at most 92 days per request.
+         *
+         *     Requires the `analytics:read` scope.
+         */
+        get: operations["readAnalyticsFunnel"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/sites/{site_id}/members": {
         parameters: {
             query?: never;
@@ -6925,6 +7065,51 @@ export interface components {
             items: components["schemas"]["CustomEventRow"][];
         };
         /**
+         * @description A custom-event row as the key-authenticated read serves it: the
+         *     aggregate and its dashboard label, **without** the dashboard row's
+         *     per-event sample (`last_seen_at`, `sample_page_path`,
+         *     `sample_properties`). The sample describes one event; this surface
+         *     exposes no individual visitor, and its callers are tool loops and
+         *     terminals that may be logged.
+         */
+        ReadCustomEventRow: {
+            /** @description The canonical name events are stored and grouped under. */
+            event_name: string;
+            event_type: string;
+            /** Format: int64 */
+            events: number;
+            /** Format: int64 */
+            billable_events: number;
+            /**
+             * Format: int64
+             * @description Distinct visitors who fired this named event in the range (the same
+             *     anonymous identity every `visitors` count uses).
+             */
+            visitors: number;
+            /** @description The dashboard label from this event's definition, or `null` when none exists. */
+            display_name: string | null;
+            /** @description The definition's sentence template, unrendered, or `null`. */
+            display_template: string | null;
+        };
+        /** @description One calendar day of a custom-events read, clipped to the requested range. */
+        CustomEventsDay: {
+            /**
+             * Format: date
+             * @description The calendar date in the request's timezone.
+             */
+            date: string;
+            from: components["schemas"]["UtcInstant"];
+            to: components["schemas"]["UtcInstant"];
+            items: components["schemas"]["ReadCustomEventRow"][];
+        };
+        ReadCustomEventsResponse: {
+            meta: components["schemas"]["AnalyticsMeta"];
+            /** @description Totals over the whole range. */
+            items: components["schemas"]["ReadCustomEventRow"][];
+            /** @description Present only with `breakdown=day`, one entry per calendar day in order. */
+            days?: components["schemas"]["CustomEventsDay"][];
+        };
+        /**
          * @description Web-vital percentiles are the merged t-digest read at
          *     [0.5, 0.75, 0.9, 0.95, 0.99]; `mean` is `value_sum / samples`.
          */
@@ -7050,6 +7235,11 @@ export interface components {
             cached: boolean;
         };
         AnalyticsFunnelResponse: {
+            meta: components["schemas"]["FunnelMeta"];
+            steps: components["schemas"]["FunnelStep"][];
+        };
+        ReadFunnelResponse: {
+            funnel: components["schemas"]["FunnelDefinition"];
             meta: components["schemas"]["FunnelMeta"];
             steps: components["schemas"]["FunnelStep"][];
         };
@@ -9141,6 +9331,16 @@ export interface components {
          */
         PagesSort: "views" | "entrances" | "exits";
         /**
+         * @description Omit for range totals only. `day` adds `days`: the same report once per
+         *     calendar day in the request's `timezone`, each day computed as its own
+         *     dashboard read. Unique visitors therefore do not add across days — a
+         *     visitor seen on two days counts on both days and once in the totals.
+         *
+         *     A daily breakdown covers at most 31 days; a wider range is
+         *     `400 RANGE_TOO_LARGE`, refused before any query runs.
+         */
+        CustomEventsBreakdown: "day";
+        /**
          * @description How many hours back the recent-visitor window reaches. Capped well below
          *     the other read ranges because these operations read the event facts per
          *     visitor rather than a rollup.
@@ -11200,6 +11400,149 @@ export interface operations {
             401: components["responses"]["Unauthenticated"];
             403: components["responses"]["MissingScopeOrSuspended"];
             404: components["responses"]["SiteNotFound"];
+            429: components["responses"]["RateLimited"];
+            503: components["responses"]["AnalyticsUnavailable"];
+        };
+    };
+    readAnalyticsCustomEvents: {
+        parameters: {
+            query: {
+                /** @description Half-open range start, ISO-8601 UTC. */
+                from: components["parameters"]["RangeFrom"];
+                /** @description Half-open range end (exclusive), ISO-8601 UTC. */
+                to: components["parameters"]["RangeTo"];
+                /** @description IANA timezone the calendar boundaries are expressed in. */
+                timezone: components["parameters"]["QueryTimezone"];
+                /** @description Maximum rows to return for a top-N report. */
+                limit?: components["parameters"]["TopNLimit"];
+                /**
+                 * @description Omit for range totals only. `day` adds `days`: the same report once per
+                 *     calendar day in the request's `timezone`, each day computed as its own
+                 *     dashboard read. Unique visitors therefore do not add across days — a
+                 *     visitor seen on two days counts on both days and once in the totals.
+                 *
+                 *     A daily breakdown covers at most 31 days; a wider range is
+                 *     `400 RANGE_TOO_LARGE`, refused before any query runs.
+                 */
+                breakdown?: components["parameters"]["CustomEventsBreakdown"];
+            };
+            header?: {
+                /**
+                 * @description Which site this request is about (ADR-0043, D3).
+                 *
+                 *     **Required with an OAuth token, refused with a private key**, and neither
+                 *     is a technicality:
+                 *
+                 *     - A token belongs to a *person* with several sites, so the request has to
+                 *       say which one. Omitted, `400 VALIDATION_FAILED` naming this header —
+                 *       there is no "your first site" default, because a CLI that silently
+                 *       reports on the wrong site is worse than one that asks.
+                 *     - A key *is* a site. Sending this with a key is `400 VALIDATION_FAILED`
+                 *       rather than being ignored: a caller that names a site is asserting
+                 *       something, and one that agrees by accident today would disagree
+                 *       tomorrow when somebody points the plugin at the wrong site.
+                 *
+                 *     The site is authorized **per request, from live membership**, not from a
+                 *     grant frozen at consent time. So a user removed from a site loses it on
+                 *     their very next request, with no token revocation and no new mechanism —
+                 *     and a site they were never in answers `SITE_NOT_FOUND`, the same answer a
+                 *     malformed id gets, so the two stay indistinguishable.
+                 *
+                 *     A header rather than a query parameter so it never mixes with the
+                 *     analytics parameters these routes already parse, and so the same URL
+                 *     means the same query for both credential kinds.
+                 */
+                "X-OA-Site"?: components["parameters"]["SiteSelector"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Custom events over the range, optionally per day. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadCustomEventsResponse"];
+                };
+            };
+            400: components["responses"]["AnalyticsBadRange"];
+            401: components["responses"]["Unauthenticated"];
+            403: components["responses"]["MissingScopeOrSuspended"];
+            404: components["responses"]["SiteNotFound"];
+            429: components["responses"]["RateLimited"];
+            503: components["responses"]["AnalyticsUnavailable"];
+        };
+    };
+    readAnalyticsFunnel: {
+        parameters: {
+            query: {
+                /** @description Half-open range start, ISO-8601 UTC. */
+                from: components["parameters"]["RangeFrom"];
+                /** @description Half-open range end (exclusive), ISO-8601 UTC. */
+                to: components["parameters"]["RangeTo"];
+                /** @description IANA timezone the calendar boundaries are expressed in. */
+                timezone: components["parameters"]["QueryTimezone"];
+            };
+            header?: {
+                /**
+                 * @description Which site this request is about (ADR-0043, D3).
+                 *
+                 *     **Required with an OAuth token, refused with a private key**, and neither
+                 *     is a technicality:
+                 *
+                 *     - A token belongs to a *person* with several sites, so the request has to
+                 *       say which one. Omitted, `400 VALIDATION_FAILED` naming this header —
+                 *       there is no "your first site" default, because a CLI that silently
+                 *       reports on the wrong site is worse than one that asks.
+                 *     - A key *is* a site. Sending this with a key is `400 VALIDATION_FAILED`
+                 *       rather than being ignored: a caller that names a site is asserting
+                 *       something, and one that agrees by accident today would disagree
+                 *       tomorrow when somebody points the plugin at the wrong site.
+                 *
+                 *     The site is authorized **per request, from live membership**, not from a
+                 *     grant frozen at consent time. So a user removed from a site loses it on
+                 *     their very next request, with no token revocation and no new mechanism —
+                 *     and a site they were never in answers `SITE_NOT_FOUND`, the same answer a
+                 *     malformed id gets, so the two stay indistinguishable.
+                 *
+                 *     A header rather than a query parameter so it never mixes with the
+                 *     analytics parameters these routes already parse, and so the same URL
+                 *     means the same query for both credential kinds.
+                 */
+                "X-OA-Site"?: components["parameters"]["SiteSelector"];
+            };
+            path: {
+                /** @description A saved funnel on the selected site, as the site's funnel list returns it. */
+                funnel_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The funnel definition and how many reached each step. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReadFunnelResponse"];
+                };
+            };
+            400: components["responses"]["AnalyticsBadRange"];
+            401: components["responses"]["Unauthenticated"];
+            403: components["responses"]["MissingScopeOrSuspended"];
+            /** @description No such site (`SITE_NOT_FOUND`), or no such funnel on it (`NOT_FOUND`). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             429: components["responses"]["RateLimited"];
             503: components["responses"]["AnalyticsUnavailable"];
         };

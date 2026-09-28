@@ -172,6 +172,22 @@ const LIMIT_PARAM = {
 } as const
 
 /**
+ * The custom-events daily breakdown.
+ *
+ * Its description carries the one rule a model gets wrong with it: unique
+ * visitors do not add across days, so summing the per-day `visitors` is not the
+ * range's visitor count — the totals already are.
+ */
+const BREAKDOWN_PARAM = {
+  name: 'breakdown',
+  description:
+    'Set to "day" to also get the same counts for each calendar day (UTC), under `days`. ' +
+    'A daily breakdown covers at most 31 days. Per-day visitors do not add up to the ' +
+    'range total — a visitor seen on two days counts on both days and once in the totals.',
+  required: false,
+} as const
+
+/**
  * The session-scoped filter set (ADR-0075, D-F1).
  *
  * Declared here so a model can ask the question the dashboard can ask, and
@@ -422,6 +438,26 @@ const mcpTools: McpToolDefinition[] = [
     description:
       'Session counts and durations, with the finalizer watermark that says how much of the range can still be revised.',
     path: '/read/analytics/sessions',
+    params: [...RANGE_PARAMS],
+    needsSite: true,
+    scope: 'analytics:read',
+  },
+  {
+    name: 'custom_events',
+    title: 'Custom Events',
+    description:
+      'Counts per custom event name on one site over a date range — events, unique visitors and billable events — with the dashboard label when the event has a definition. The numbers on the dashboard’s Custom events screen. Add breakdown=day for per-day counts.',
+    path: '/read/analytics/custom-events',
+    params: [...RANGE_PARAMS, LIMIT_PARAM, BREAKDOWN_PARAM],
+    needsSite: true,
+    scope: 'analytics:read',
+  },
+  {
+    name: 'funnel_report',
+    title: 'Funnel Report',
+    description:
+      'Run one saved funnel over a date range: how many visitors (or sessions, per the funnel’s scope) reached each step, and each step’s conversion from the first. The numbers on the dashboard’s Funnels screen. The funnel_id comes from list_funnels, and the definition that was measured comes back with the counts. At most 92 days per call.',
+    path: '/read/analytics/funnels/{funnel_id}',
     params: [...RANGE_PARAMS],
     needsSite: true,
     scope: 'analytics:read',

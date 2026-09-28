@@ -1705,6 +1705,105 @@ paths:
         '503':
           $ref: '#/components/responses/AnalyticsUnavailable'
 
+  /v1/read/analytics/custom-events:
+    parameters:
+      - $ref: '#/components/parameters/SiteSelector'
+      - $ref: '#/components/parameters/RangeFrom'
+      - $ref: '#/components/parameters/RangeTo'
+      - $ref: '#/components/parameters/QueryTimezone'
+      - $ref: '#/components/parameters/TopNLimit'
+      - $ref: '#/components/parameters/CustomEventsBreakdown'
+    get:
+      operationId: readAnalyticsCustomEvents
+      tags: [read-key]
+      summary: Events, billable events and unique visitors per custom event name.
+      description: |
+        The dashboard's Custom events report through a key or a token: the same
+        service method and the same labels, so the counts, `display_name` and
+        `display_template` are what the dashboard shows (null for an event with
+        no definition). Unfiltered, as on the dashboard. Each row is the
+        aggregate only — the dashboard's per-event sample is not served here.
+
+        `breakdown=day` adds one row set per calendar day under `days`.
+
+        Requires the `analytics:read` scope.
+      security:
+        - privateApiKey: []
+        - oauthAccessToken: ['analytics:read']
+      responses:
+        '200':
+          description: Custom events over the range, optionally per day.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadCustomEventsResponse'
+        '400':
+          $ref: '#/components/responses/AnalyticsBadRange'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/MissingScopeOrSuspended'
+        '404':
+          $ref: '#/components/responses/SiteNotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/AnalyticsUnavailable'
+
+  /v1/read/analytics/funnels/{funnel_id}:
+    parameters:
+      - $ref: '#/components/parameters/SiteSelector'
+      - name: funnel_id
+        in: path
+        required: true
+        description: A saved funnel on the selected site, as the site's funnel list returns it.
+        schema:
+          type: string
+      - $ref: '#/components/parameters/RangeFrom'
+      - $ref: '#/components/parameters/RangeTo'
+      - $ref: '#/components/parameters/QueryTimezone'
+    get:
+      operationId: readAnalyticsFunnel
+      tags: [read-key]
+      summary: One saved funnel's step counts and conversion over a range.
+      description: |
+        Runs the stored definition — its steps, scope and window — through the
+        same computation as the dashboard's Funnels screen; only the range comes
+        from the caller. The definition is returned beside the counts. An
+        archived funnel still runs.
+
+        The funnel is looked up on the selected site only: an id from another
+        site, and an id that is not one at all, are both `404 NOT_FOUND`. A
+        funnel covers at most 92 days per request.
+
+        Requires the `analytics:read` scope.
+      security:
+        - privateApiKey: []
+        - oauthAccessToken: ['analytics:read']
+      responses:
+        '200':
+          description: The funnel definition and how many reached each step.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadFunnelResponse'
+        '400':
+          $ref: '#/components/responses/AnalyticsBadRange'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/MissingScopeOrSuspended'
+        '404':
+          description: No such site (`SITE_NOT_FOUND`), or no such funnel on it (`NOT_FOUND`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/AnalyticsUnavailable'
+
   /v1/sites/{site_id}/members:
     parameters:
       - name: site_id
@@ -9008,6 +9107,80 @@ components:
           items:
             $ref: '#/components/schemas/CustomEventRow'
 
+    ReadCustomEventRow:
+      type: object
+      additionalProperties: false
+      description: |
+        A custom-event row as the key-authenticated read serves it: the
+        aggregate and its dashboard label, **without** the dashboard row's
+        per-event sample (`last_seen_at`, `sample_page_path`,
+        `sample_properties`). The sample describes one event; this surface
+        exposes no individual visitor, and its callers are tool loops and
+        terminals that may be logged.
+      required:
+        [event_name, event_type, events, billable_events, visitors, display_name, display_template]
+      properties:
+        event_name:
+          type: string
+          description: The canonical name events are stored and grouped under.
+        event_type:
+          type: string
+        events:
+          type: integer
+          format: int64
+        billable_events:
+          type: integer
+          format: int64
+        visitors:
+          type: integer
+          format: int64
+          description: |
+            Distinct visitors who fired this named event in the range (the same
+            anonymous identity every `visitors` count uses).
+        display_name:
+          type: [string, 'null']
+          description: The dashboard label from this event's definition, or `null` when none exists.
+        display_template:
+          type: [string, 'null']
+          description: The definition's sentence template, unrendered, or `null`.
+
+    CustomEventsDay:
+      type: object
+      additionalProperties: false
+      required: [date, from, to, items]
+      description: One calendar day of a custom-events read, clipped to the requested range.
+      properties:
+        date:
+          type: string
+          format: date
+          description: The calendar date in the request's timezone.
+        from:
+          $ref: '#/components/schemas/UtcInstant'
+        to:
+          $ref: '#/components/schemas/UtcInstant'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReadCustomEventRow'
+
+    ReadCustomEventsResponse:
+      type: object
+      additionalProperties: false
+      required: [meta, items]
+      properties:
+        meta:
+          $ref: '#/components/schemas/AnalyticsMeta'
+        items:
+          type: array
+          description: Totals over the whole range.
+          items:
+            $ref: '#/components/schemas/ReadCustomEventRow'
+        days:
+          type: array
+          description: Present only with `breakdown=day`, one entry per calendar day in order.
+          items:
+            $ref: '#/components/schemas/CustomEventsDay'
+
     PerformanceRow:
       type: object
       additionalProperties: false
@@ -9254,6 +9427,20 @@ components:
       additionalProperties: false
       required: [meta, steps]
       properties:
+        meta:
+          $ref: '#/components/schemas/FunnelMeta'
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/FunnelStep'
+
+    ReadFunnelResponse:
+      type: object
+      additionalProperties: false
+      required: [funnel, meta, steps]
+      properties:
+        funnel:
+          $ref: '#/components/schemas/FunnelDefinition'
         meta:
           $ref: '#/components/schemas/FunnelMeta'
         steps:
@@ -12003,6 +12190,21 @@ components:
         type: string
         enum: [views, entrances, exits]
         default: views
+    CustomEventsBreakdown:
+      name: breakdown
+      in: query
+      required: false
+      description: |
+        Omit for range totals only. `day` adds `days`: the same report once per
+        calendar day in the request's `timezone`, each day computed as its own
+        dashboard read. Unique visitors therefore do not add across days — a
+        visitor seen on two days counts on both days and once in the totals.
+
+        A daily breakdown covers at most 31 days; a wider range is
+        `400 RANGE_TOO_LARGE`, refused before any query runs.
+      schema:
+        type: string
+        enum: [day]
     RecentWindowHours:
       name: hours
       in: query

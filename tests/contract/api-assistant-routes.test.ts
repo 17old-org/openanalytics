@@ -588,7 +588,9 @@ describe('the tool loop is the read route (D3, D4, D9, D10)', () => {
     const app = buildApp({ client })
     await events(await ask(app, question()))
     expect(seen[0]?.tools?.map((tool) => tool.name).sort()).toEqual([
+      'custom_events',
       'devices',
+      'funnel_report',
       'geography',
       'list_sites',
       'revenue_summary',

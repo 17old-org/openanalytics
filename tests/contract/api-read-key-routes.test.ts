@@ -427,7 +427,10 @@ describe('a path that does not exist says so', () => {
     }
     siteBasics.value = activeSite()
 
-    for (const excluded of ['recent-visitors', 'visitor', 'custom-events', 'funnel', 'revenue']) {
+    // `custom-events` left this list when it became a read (aggregates only);
+    // `funnel` is the ad-hoc computation, which stays off — saved funnels are
+    // read by id at `/funnels/{funnel_id}`, a different path.
+    for (const excluded of ['recent-visitors', 'visitor', 'funnel', 'revenue']) {
       const app = buildApp({ withBusinessSubtree: true })
       const res = await get(`/v1/read/analytics/${excluded}?${RANGE}`, KEY, app)
       expect(res.status, excluded).toBe(404)

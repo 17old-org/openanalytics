@@ -12,7 +12,12 @@ import {
   type AnalyticsFilter,
   type FunnelScope,
 } from '@openanalytics/domain'
-import { getFinalizerState, listEventDisplayNames, type Database } from '@openanalytics/postgres'
+import {
+  getFinalizerState,
+  listEventDisplayNames,
+  type Database,
+  type EventDisplayRecord,
+} from '@openanalytics/postgres'
 import { Hono } from 'hono'
 import type { AnalyticsReportRequest, AnalyticsService, PagesSort } from '../analytics/service.ts'
 import { requireAnalyticsAccess, siteMembership, type ApiVariables } from './middleware.ts'
@@ -294,6 +299,32 @@ function parseFunnel(
   return { scope: parsed.data.scope, steps: parsed.data.steps, windowMs: parsed.data.windowMs }
 }
 
+/**
+ * Custom-event rows decorated with their dashboard labels (ADR-0034, D7).
+ *
+ * Shared by the dashboard's custom-events route and the key-authenticated read,
+ * so the two doors label one row one way. `display_template` travels
+ * **unrendered**: these rows are aggregates grouped by name, and there is no
+ * single event's properties to render a sentence against.
+ */
+export function withEventDisplayNames<Row extends { readonly event_name: string }>(
+  items: readonly Row[],
+  labels: readonly EventDisplayRecord[],
+): (Row & { display_name: string | null; display_template: string | null })[] {
+  const byName = new Map(labels.map((label) => [label.eventName, label]))
+  return items.map((item) => {
+    const label = byName.get(item.event_name)
+    return {
+      ...item,
+      // Required-and-nullable, the ADR-0027 convention: `null` states "this
+      // event has no dashboard definition", which is a fact a client renders
+      // differently from "we did not look".
+      display_name: label?.displayName ?? null,
+      display_template: label?.displayTemplate ?? null,
+    }
+  })
+}
+
 /** The timezone parameter alone — the recent-visitor reads take no from/to. */
 export function parseTimezone(query: Record<string, string | undefined>): string {
   const timezone = timezoneSchema.safeParse(query['timezone'])
@@ -439,21 +470,7 @@ export function createAnalyticsRoutes(deps: {
       listEventDisplayNames(db, siteId),
     ])
 
-    const byName = new Map(labels.map((label) => [label.eventName, label]))
-    return c.json({
-      ...report,
-      items: report.items.map((item) => {
-        const label = byName.get(item.event_name)
-        return {
-          ...item,
-          // Required-and-nullable, the ADR-0027 convention: `null` states "this
-          // event has no dashboard definition", which is a fact a client renders
-          // differently from "we did not look".
-          display_name: label?.displayName ?? null,
-          display_template: label?.displayTemplate ?? null,
-        }
-      }),
-    })
+    return c.json({ ...report, items: withEventDisplayNames(report.items, labels) })
   })
   reportRoute('performance', (s, req) => s.performance(req))
 

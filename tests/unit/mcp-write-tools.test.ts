@@ -135,6 +135,10 @@ const EXPECTED_READ_TOOLS = [
   'geography',
   'devices',
   'sessions',
+  // Custom-event counts and saved-funnel results on the read surface: the
+  // dashboard's Custom events and Funnels numbers, for a key or a token.
+  'custom_events',
+  'funnel_report',
   'revenue_summary',
   'revenue_timeseries',
   'site_install',
@@ -177,9 +181,10 @@ describe('the tool roster is pinned by name, not derived', () => {
     // the assistant's catalogue); D3 added seven management reads and twelve
     // writes. 10 + 19 = 29 was the arithmetic until the open-core split moved
     // `billing_usage` out to the surface that serves it, so a build with no such
-    // surface advertises 28.
-    expect(MCP_TOOLS).toHaveLength(28)
-    expect(EXPECTED_READ_TOOLS.length + EXPECTED_WRITE_TOOLS.length).toBe(28)
+    // surface advertises 28 — and 30 once `custom_events` and `funnel_report`
+    // joined the analytics reads.
+    expect(MCP_TOOLS).toHaveLength(30)
+    expect(EXPECTED_READ_TOOLS.length + EXPECTED_WRITE_TOOLS.length).toBe(30)
     // The five that were missing until the roster was pinned. Named
     // individually so a regression says which one went.
     for (const name of [
@@ -258,7 +263,7 @@ describe('annotations divide reads from writes', () => {
  * recomputed the filter would agree with any filter, including a widened one.
  */
 describe('the assistant sees the analytics and revenue reads, and nothing else', () => {
-  it('is exactly these ten tools', () => {
+  it('is exactly these twelve tools', () => {
     expect(ASSISTANT_TOOLS.map((t) => t.name)).toEqual([
       'list_sites',
       'site_overview',
@@ -268,6 +273,8 @@ describe('the assistant sees the analytics and revenue reads, and nothing else',
       'geography',
       'devices',
       'sessions',
+      'custom_events',
+      'funnel_report',
       'revenue_summary',
       'revenue_timeseries',
     ])

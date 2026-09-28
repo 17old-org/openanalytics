@@ -15,9 +15,11 @@ import {
 import {
   chargeReadCost,
   getFinalizerState,
+  getFunnel,
   getLiveTrackingToken,
   getMembership,
   getSiteBasics,
+  listEventDisplayNames,
   listSitesForUser,
   readCostSpent,
   resolveOAuthAccessToken,
@@ -39,8 +41,11 @@ import {
   parsePagesSort,
   parseRange,
   parseResolution,
+  withEventDisplayNames,
 } from './analytics.ts'
 import type { CredentialUseRecorder } from './credential-events.ts'
+import { dailyWindows, type DailyWindow } from './daily-windows.ts'
+import { funnelJson } from './funnels.ts'
 import { bearerToken, canonicalSiteId } from './middleware.ts'
 import { readConnection } from './revenue-analytics.ts'
 import type { RateLimiter } from './rate-limit.ts'
@@ -200,7 +205,7 @@ export interface ReadKeyDeps {
   /**
    * The analytics service, present only when a query gateway is configured.
    *
-   * Absent, the seven analytics reads answer `SERVICE_UNAVAILABLE` rather than
+   * Absent, the analytics reads answer `SERVICE_UNAVAILABLE` rather than
    * not being mounted. The collector's tracker-config endpoint set that
    * precedent and gave the reason: an unwired deployment is an operator problem,
    * and the caller must be able to tell "not ready" from "you may not". Here the
@@ -253,6 +258,63 @@ export interface ReadKeyDeps {
 
 /** Revenue's two grains, as `revenue-analytics.ts` defines them. */
 const REVENUE_RESOLUTIONS: readonly Resolution[] = ['hour', 'day']
+
+/**
+ * The widest range a per-day custom-events breakdown serves.
+ *
+ * A daily breakdown is one dashboard report per day — the same operation, so
+ * each day's numbers are the dashboard's own for that day — which makes its cost
+ * linear in the range. A month is the question it exists for; a wider window is
+ * several requests, named up front as `RANGE_TOO_LARGE` rather than discovered
+ * as a slow one.
+ */
+export const MAX_DAILY_BREAKDOWN_DAYS = 31
+
+/** How many of those per-day reports run at once against the gateway. */
+const DAILY_BREAKDOWN_CONCURRENCY = 4
+
+/**
+ * A custom-event row as this surface serves it: the aggregate, and no sample.
+ *
+ * The dashboard's row also carries `last_seen_at`, `sample_page_path` and
+ * `sample_properties` (ADR-0038 D5) — the newest *single event* of that name,
+ * its page and its property bag. This surface stays the one that "exposes no
+ * individual visitor" (ADR-0042 D4): its callers are tool loops and terminals
+ * that may be logged or shared on a screen, the question they ask is "how many",
+ * and one event's properties stay on the dashboard where a person is looking at
+ * them. An explicit projection rather than a delete, so a sample field added
+ * later cannot travel here by default. All three are optional in the contract's
+ * `CustomEventRow`, so their absence is the shape, not a gap.
+ */
+function aggregateCustomEventRow(row: {
+  readonly event_name: string
+  readonly event_type: string
+  readonly events: number
+  readonly billable_events: number
+  readonly visitors: number
+}) {
+  return {
+    event_name: row.event_name,
+    event_type: row.event_type,
+    events: row.events,
+    billable_events: row.billable_events,
+    visitors: row.visitors,
+  }
+}
+
+/**
+ * The custom-events `breakdown` parameter: absent for totals only, `day` for
+ * totals plus one row set per calendar day. Anything else is refused by name —
+ * a caller who believed they were getting weeks must not silently get totals.
+ */
+function parseBreakdown(query: Record<string, string | undefined>): 'day' | null {
+  const raw = query['breakdown']
+  if (raw === undefined) return null
+  if (raw === 'day') return 'day'
+  throw new ApiError('VALIDATION_FAILED', 'breakdown must be "day"', {
+    details: { issues: [{ path: 'breakdown', message: 'must be "day"' }] },
+  })
+}
 
 /** Best-effort client IP, for the budget an unauthenticated caller draws on. */
 function clientIp(headerValue: string | undefined): string {
@@ -894,7 +956,8 @@ export function createReadKeyRoutes(deps: ReadKeyDeps): Hono<Env> {
           ...parseRange(query),
           limit: parseLimit(query),
           // Every report reachable through `report` is filterable (ADR-0075,
-          // D-F2) — custom events and performance are not mounted here.
+          // D-F2) — custom events has its own route below, unfiltered as on the
+          // dashboard, and performance is not mounted here.
           filters: parseFilters(query),
         }),
       )
@@ -945,6 +1008,118 @@ export function createReadKeyRoutes(deps: ReadKeyDeps): Hono<Env> {
         finalizedThrough: state ? state.finalizedThrough : null,
       }),
     )
+  })
+
+  /**
+   * Custom events: events, billable events and visitors per event name, labelled
+   * exactly as the dashboard's Custom events screen labels them.
+   *
+   * The dashboard's own method and the dashboard's own decoration
+   * (`withEventDisplayNames`), so the counts an owner's key sees are the counts
+   * the owner sees — without the per-event sample (`aggregateCustomEventRow`).
+   * Unfiltered, as on the dashboard: custom events have no filtered operation
+   * (ADR-0075, D-F2), so a `filters` parameter is not read here rather than
+   * being half-applied.
+   *
+   * `breakdown=day` adds `days` — the same report once per calendar day in the
+   * request's timezone. Each day is its own dashboard read, not a share of the
+   * range's totals, which is why a visitor who came back on two days counts on
+   * both days and once in the totals: unique visitors do not add across days.
+   * The width check runs before any report does, so a refused breakdown costs no
+   * gateway query at all.
+   */
+  reads.get('/custom-events', async (c) => {
+    const { siteId } = c.get('readPrincipal')
+    const query = c.req.query()
+    const range = parseRange(query)
+    const limit = parseLimit(query)
+    const breakdown = parseBreakdown(query)
+
+    if (breakdown === 'day') {
+      const verdict = checkDeclaredRange({
+        from: new Date(range.from),
+        to: new Date(range.to),
+        maxDays: MAX_DAILY_BREAKDOWN_DAYS,
+      })
+      if (!verdict.allowed) {
+        throw new ApiError(
+          'RANGE_TOO_LARGE',
+          `breakdown=day serves at most ${verdict.maxDays} days per request; ask for a narrower window`,
+          { details: { requested_days: verdict.requestedDays, max_days: verdict.maxDays } },
+        )
+      }
+    }
+
+    const service = analytics()
+    const report = (window: { readonly from: string; readonly to: string }) =>
+      service.customEvents({
+        siteId,
+        cacheEpoch: c.get('siteCacheEpoch'),
+        importPointer: c.get('siteImportPointer'),
+        from: window.from,
+        to: window.to,
+        timezone: range.timezone,
+        limit,
+      })
+
+    const [totals, labels] = await Promise.all([report(range), listEventDisplayNames(db, siteId)])
+    const served = (items: typeof totals.items) =>
+      withEventDisplayNames(items.map(aggregateCustomEventRow), labels)
+    const body = { meta: totals.meta, items: served(totals.items) }
+    if (breakdown !== 'day') return c.json(body)
+
+    const labelledDay = (window: DailyWindow, items: typeof totals.items) => ({
+      date: window.date,
+      from: window.from,
+      to: window.to,
+      items: served(items),
+    })
+    const windows = dailyWindows(range.from, range.to, range.timezone)
+    const days: ReturnType<typeof labelledDay>[] = []
+    for (let start = 0; start < windows.length; start += DAILY_BREAKDOWN_CONCURRENCY) {
+      const batch = windows.slice(start, start + DAILY_BREAKDOWN_CONCURRENCY)
+      const reports = await Promise.all(batch.map((window) => report(window)))
+      days.push(...batch.map((window, index) => labelledDay(window, reports[index]?.items ?? [])))
+    }
+    return c.json({ ...body, days })
+  })
+
+  /**
+   * One saved funnel, run over the requested range: how many reached each step.
+   *
+   * The definition is read from the credential's own site — `getFunnel` puts
+   * the site in its `WHERE` — so a funnel id from another site reads as absent,
+   * the same `404` an id that is not a uuid gets: "that is not an id" and "you
+   * cannot see it" stay indistinguishable to somebody holding one. Then it is the
+   * dashboard's own computation (ADR-0012): the stored steps, scope and window
+   * handed to the same service method the Funnels screen calls. Nothing but the
+   * range comes from the caller.
+   *
+   * The definition travels back with the counts, so a caller reads what was
+   * measured without a second request. An archived funnel still runs: archiving
+   * hides a definition from the list, it does not delete the question.
+   */
+  reads.get('/funnels/:funnel_id', async (c) => {
+    const { siteId } = c.get('readPrincipal')
+    const range = parseRange(c.req.query())
+    // The canonical uuid spelling, whatever the path used; not a uuid at all is
+    // answered before any database work.
+    const funnelId = canonicalSiteId(c.req.param('funnel_id'))
+    if (funnelId === null) throw new ApiError('NOT_FOUND', 'No such funnel on this site')
+
+    const funnel = await getFunnel(db, { id: funnelId, siteId })
+    if (!funnel) throw new ApiError('NOT_FOUND', 'No such funnel on this site')
+
+    const result = await analytics().funnel({
+      siteId,
+      cacheEpoch: c.get('siteCacheEpoch'),
+      importPointer: c.get('siteImportPointer'),
+      ...range,
+      steps: funnel.steps,
+      scope: funnel.scope,
+      windowMs: funnel.windowMs,
+    })
+    return c.json({ funnel: funnelJson(funnel), ...result })
   })
 
   app.route('/read/analytics', reads)

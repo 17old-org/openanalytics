@@ -61,18 +61,20 @@ const ANALYTICS_READS = [
   'geography',
   'devices',
   'sessions',
+  'custom-events',
+  'funnels/{funnel_id}',
 ] as const
 
 describe('the read-key surface (ADR-0042)', () => {
   /**
-   * The seven reads, pinned in the generated client.
+   * The nine reads, pinned in the generated client.
    *
    * If a path leaves `openapi.yaml`, its entry in `paths` disappears, the
    * intersection with `keyof paths` collapses to `never`, and the literal below
    * stops being assignable. That is the whole point of writing it this way
    * rather than as a list of strings the compiler never looks at.
    */
-  it('documents seven analytics reads plus the site context, keyed by the credential', () => {
+  it('documents nine analytics reads plus the site context, keyed by the credential', () => {
     const documented: readonly (keyof paths)[] = [
       '/v1/read/site',
       '/v1/read/analytics/overview',
@@ -82,8 +84,10 @@ describe('the read-key surface (ADR-0042)', () => {
       '/v1/read/analytics/geography',
       '/v1/read/analytics/devices',
       '/v1/read/analytics/sessions',
+      '/v1/read/analytics/custom-events',
+      '/v1/read/analytics/funnels/{funnel_id}',
     ]
-    expect(documented).toHaveLength(8)
+    expect(documented).toHaveLength(10)
   })
 
   it('authenticates every read with the private key and nothing else', () => {
@@ -120,20 +124,44 @@ describe('the read-key surface (ADR-0042)', () => {
    * "the string does not appear" no longer states what D4 meant. The three tests
    * below say it precisely instead: no key may reach it, and the row-level reads
    * are absent for everybody.
+   *
+   * **`custom-events` and saved funnels left it on 2026-09-28**, as aggregates:
+   * counts per event name without the dashboard's per-event sample, and step
+   * counts for a stored funnel by id. The test after this one pins the "no
+   * individual visitor" half for them. The ad-hoc funnel — arbitrary steps
+   * computed on request — stays excluded, so its exact path is what is
+   * asserted absent (the saved-funnel path shares its prefix).
    */
   it('exposes no individual visitor, and no surface D4 excluded', () => {
-    for (const excluded of [
-      'recent-visitors',
-      'visitor',
-      'custom-events',
-      'funnel',
-      'performance',
-    ]) {
+    for (const excluded of ['recent-visitors', 'visitor', 'performance']) {
       expect(spec, `${excluded} must not be readable here`).not.toContain(
         `/v1/read/analytics/${excluded}`,
       )
       expect(spec).not.toContain(`/v1/read/${excluded}`)
     }
+    expect(spec, 'the ad-hoc funnel must not be readable here').not.toContain(
+      '\n  /v1/read/analytics/funnel:\n',
+    )
+    expect(spec).not.toContain('\n  /v1/read/funnel:\n')
+  })
+
+  it('serves custom events and saved funnels as aggregates, never a single event', () => {
+    const events = pathBlock('/v1/read/analytics/custom-events')
+    expect(events).toContain("$ref: '#/components/schemas/ReadCustomEventsResponse'")
+    // The read row is its own schema, and it has no field that could carry the
+    // dashboard's per-event sample.
+    const row = spec.slice(spec.indexOf('\n    ReadCustomEventRow:\n'))
+    const rowBlock = row.slice(0, row.indexOf('\n    CustomEventsDay:\n'))
+    for (const field of ['last_seen_at', 'sample_page_path', 'sample_properties']) {
+      expect(rowBlock, `${field} must not be a property of ReadCustomEventRow`).not.toMatch(
+        new RegExp(`\\n {8}${field}:`, 'u'),
+      )
+    }
+    expect(rowBlock).toContain('additionalProperties: false')
+
+    const funnel = pathBlock('/v1/read/analytics/funnels/{funnel_id}')
+    expect(funnel).toContain("$ref: '#/components/schemas/ReadFunnelResponse'")
+    expect(funnel).toContain("oauthAccessToken: ['analytics:read']")
   })
 
   it('keeps revenue off every key-accepting route', () => {
