@@ -1,0 +1,48 @@
+# Fork-only: builds the api image that carries this branch's read-surface
+# additions, exactly the way release.yml builds the api image
+# (infra/docker/node-app.Dockerfile with APP=api).
+#
+# Only apps/api changes on this branch, so the api is the only image built here;
+# every other service keeps running the upstream release image of the same
+# version. The image is tagged with the commit it was built from, so a
+# deployment pins a commit rather than a moving name.
+name: Fork api image
+
+on:
+  push:
+    branches: [feat/read-custom-events-funnels]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/node-app.Dockerfile
+          push: true
+          build-args: |
+            APP=api
+            GIT_COMMIT=${{ github.sha }}
+          tags: |
+            ghcr.io/${{ github.repository }}/api:${{ github.sha }}
+          cache-from: type=gha,scope=fork-api
+          cache-to: type=gha,mode=max,scope=fork-api
+          provenance: false
