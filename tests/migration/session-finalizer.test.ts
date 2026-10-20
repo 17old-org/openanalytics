@@ -359,12 +359,14 @@ describeIfClickHouse('session finalizer behaviour', () => {
         type: 'page_view',
         occurredMs: baseMs + index * 10 * 60_000,
         anonymousId: `v${index}`,
+        sessionHint: `hint${index}`,
       },
       {
         eventId: randomUUID(),
         type: 'page_view',
         occurredMs: baseMs + (index * 10 + 20) * 60_000,
         anonymousId: `v${index}`,
+        sessionHint: `hint${index}`,
       },
     ]).flat()
     await insertEvents(site, events)

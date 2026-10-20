@@ -41,6 +41,9 @@ also checks real tail SQL, latest-version tombstone handling and final rollups.
 2. Build and test the exact reviewed commit. This fork's worker-image workflow
    is manual only. Dispatching it publishes an image and is a separate operator
    action, not an effect of opening or updating the pull request.
+   GitHub requires this workflow to exist on the default branch before it can
+   be dispatched. Register it through the separate workflow-only pull request
+   first, then select the reviewed repair branch as the dispatch ref.
 3. Run the normal ClickHouse migration runner with the reviewed migrations.
    Dry-run first, verify only expected pending files, then apply. The migration
    account performs DDL. No worker credential or grant changes are required.
