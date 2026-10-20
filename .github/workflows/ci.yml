@@ -175,20 +175,31 @@ jobs:
       - name: Build
         run: pnpm run build
 
-      # Started as a step rather than as a `services:` container: the official
-      # image needs `server /data` as its command, and service containers can
-      # only supply an image plus options, never arguments. `bitnami/minio`,
-      # which does start a server unattended, no longer publishes public tags.
-      #
-      # Pinned to a release rather than `latest` for the same reason Node and
-      # ClickHouse are pinned — a floating tag makes CI results depend on when
-      # they ran (D-203).
+      # MinIO's public release image and legacy binaries are no longer
+      # available. Build the SAME pinned release from its official source,
+      # keeping the real S3 server and health checks rather than skipping them.
+      - name: Check out pinned MinIO source
+        uses: actions/checkout@v5
+        with:
+          repository: minio/minio
+          # RELEASE.2025-09-07T16-13-09Z, dereferenced to its immutable commit.
+          ref: 07c3a429bfed433e49018cb0f78a52145d4bedeb
+          path: .ci-minio
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.24.2'
+          cache-dependency-path: .ci-minio/go.sum
+
+      - name: Build pinned MinIO
+        run: go build -C .ci-minio -o "$RUNNER_TEMP/minio" .
+
       - name: Start MinIO
         run: |
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
+            "$RUNNER_TEMP/minio" server "$RUNNER_TEMP/minio-data" \
+            > "$RUNNER_TEMP/minio.log" 2>&1 &
 
       - name: Wait for MinIO
         run: |
@@ -201,7 +212,7 @@ jobs:
           done
           echo "minio did not become live within 120s; last attempt:"
           curl -vsS http://localhost:9000/minio/health/live || true
-          docker logs minio || true
+          cat "$RUNNER_TEMP/minio.log" || true
           exit 1
 
       # `noeviction` is D-205's requirement for the queue instance and the one
