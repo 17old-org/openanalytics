@@ -110,6 +110,7 @@ function storedFactOf(session: CanonicalSession): StoredSessionFact {
     anonymousId: session.anonymousId,
     sessionHint: session.sessionHint,
     sessionHints: session.sessionHints,
+    eventIds: session.eventIds,
     midnightBridged: session.midnightBridged ? 1 : 0,
     pageviews: session.pageviews,
     engaged: session.engaged ? 1 : 0,
@@ -184,6 +185,7 @@ function harness(): Harness {
         lastOccurredMs: last === undefined ? null : Number(last.occurredAt),
       })
     },
+    readFinalizedSessionTails: async () => await Promise.resolve([]),
     readStoredFacts: async ({ fromMs, toMs }: { siteId: string; fromMs: number; toMs: number }) => {
       storedReads.push({ fromMs, toMs })
       return await Promise.resolve(

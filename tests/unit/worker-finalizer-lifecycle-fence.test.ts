@@ -47,6 +47,7 @@ const store = {
     readWindow.push(input.siteId)
     return await Promise.resolve({ events: [], truncated: false, lastOccurredMs: null })
   },
+  readFinalizedSessionTails: async () => await Promise.resolve([]),
   readStoredFacts: async () => await Promise.resolve([]),
   insertFactVersions: async () => {
     await Promise.resolve()
