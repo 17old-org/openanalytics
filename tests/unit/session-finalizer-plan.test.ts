@@ -44,6 +44,7 @@ function storedFrom(
     anonymousId: session.anonymousId,
     sessionHint: session.sessionHint,
     sessionHints: session.sessionHints,
+    eventIds: session.eventIds,
     midnightBridged: session.midnightBridged ? 1 : 0,
     pageviews: session.pageviews,
     engaged: session.engaged ? 1 : 0,
@@ -114,6 +115,22 @@ describe('planSessionFacts', () => {
     expect(row.retracted).toBe(0)
     // The whole session is behind the horizon, so nothing is provisional.
     expect(plan.finalizedThroughMs).toBe(nowMs - HORIZON_SLACK_MS)
+  })
+
+  it('bootstraps missing event membership before advancing past a legacy fact', () => {
+    const recomputed = sessionize(SITE, [pageView('old-e1', '2026-07-23T10:00:00.000Z')])
+    const legacy = { ...storedFrom(recomputed[0]!, 7, { finalized: true }), eventIds: [] }
+    const plan = planSessionFacts({
+      siteId: SITE,
+      recomputed,
+      stored: [legacy],
+      nowMs: Date.parse('2026-07-25T11:00:00.000Z'),
+      inactivityMs: INACTIVITY_MS,
+      latenessMs: LATENESS_MS,
+    })
+    expect(plan.changed).toBe(1)
+    expect(plan.factRows[0]!.version).toBe(8)
+    expect(plan.factRows[0]!.event_ids).toEqual(['old-e1'])
   })
 
   it('writes nothing when the recompute is byte-identical to what is stored', () => {
@@ -212,9 +229,8 @@ describe('planSessionFacts', () => {
     expect(plan.finalizedThroughMs).toBe(recomputed[0]!.startMs)
   })
 
-  // The watermark must be pulled back so that no recomputed session's span
-  // straddles it: the next `>= watermark` window would otherwise bisect an
-  // overlapping session and duplicate its tail (audit finding).
+  // Closed overlapping sessions carry durable exact event membership, so only
+  // a provisional session may hold the watermark back.
   const oneSession = (anon: string, isos: readonly string[]): CanonicalSession => {
     const events: SessionizerEvent[] = isos.map((iso, i) => ({
       eventId: `${anon}-${i}`,
@@ -230,7 +246,7 @@ describe('planSessionFacts', () => {
   // "now" a day later so the horizon is 2026-07-24T11:30:00Z.
   const NOW_MS = Date.parse('2026-07-25T12:00:00.000Z')
 
-  it('pulls the watermark back past a finalized session overlapping the earliest provisional one', () => {
+  it('advances past a closed session overlapping the earliest provisional one', () => {
     // P is a long-lived provisional session straddling the horizon; its start is
     // the naive watermark candidate. F is an already-finalized session of a
     // DIFFERENT visitor whose span overlaps P.start — reading from P.start would
@@ -251,11 +267,13 @@ describe('planSessionFacts', () => {
       inactivityMs: INACTIVITY_MS,
       latenessMs: LATENESS_MS,
     })
-    // Not P.start (the naive candidate) — pulled back to F.start.
-    expect(plan.finalizedThroughMs).toBe(f.startMs)
+    expect(plan.finalizedThroughMs).toBe(p.startMs)
+    expect(plan.factRows.find((row) => row.session_id === f.sessionId)?.event_ids).toEqual(
+      f.eventIds,
+    )
   })
 
-  it('walks the pull-back to a fixpoint through a chain of overlapping sessions', () => {
+  it('does not pull back through a chain of closed overlapping sessions', () => {
     // F1 straddles P.start; F2 straddles F1.start. Only a fixpoint loop reaches
     // F2.start — a single pass keyed on the original candidate would stop at F1.
     const p = oneSession('botP', ['2026-07-24T11:10:00.000Z', '2026-07-24T11:35:00.000Z'])
@@ -274,10 +292,10 @@ describe('planSessionFacts', () => {
       inactivityMs: INACTIVITY_MS,
       latenessMs: LATENESS_MS,
     })
-    expect(plan.finalizedThroughMs).toBe(f2.startMs)
+    expect(plan.finalizedThroughMs).toBe(p.startMs)
   })
 
-  it('pulls back for a session whose last event is exactly at the candidate watermark', () => {
+  it('retains exact membership when a closed tail ends exactly at the watermark', () => {
     // F.end === P.start === the candidate watermark: an event at occurred_at == wm
     // is included by the next `>=` read, so this must pull back (the endMs >= wm
     // boundary, not >).
@@ -293,7 +311,7 @@ describe('planSessionFacts', () => {
       inactivityMs: INACTIVITY_MS,
       latenessMs: LATENESS_MS,
     })
-    expect(plan.finalizedThroughMs).toBe(f.startMs)
+    expect(plan.finalizedThroughMs).toBe(p.startMs)
   })
 
   it('retracts a stored session that the recompute no longer produces', () => {
@@ -457,6 +475,42 @@ describe('planRollupSwap', () => {
  * and the watermark advances instead of being pinned to the stream's start.
  */
 describe('planSessionFacts — 24h cap keeps the watermark advancing (ADR-0018)', () => {
+  it('makes bounded progress through a capped backlog of overlapping visitors', () => {
+    const fromMs = Date.parse('2026-09-28T00:24:17.919Z')
+    const readThroughMs = fromMs + 6 * 60 * 60_000
+    // Every visitor leaves after 20 minutes. Their independent sessions overlap
+    // because a new visitor arrives every 10 minutes, so there is no site-wide
+    // gap even though no session is remotely close to the 24h cap.
+    const events: SessionizerEvent[] = Array.from({ length: 36 }, (_, index) => {
+      const startMs = fromMs + index * 10 * 60_000
+      return [0, 20 * 60_000].map((offset, eventIndex) => ({
+        eventId: `visitor-${index}-event-${eventIndex}`,
+        type: 'page_view',
+        occurredAt: startMs + offset,
+        anonymousId: `visitor-${index}`,
+        sessionHint: `hint-${index}`,
+        pagePath: '/',
+      }))
+    })
+      .flat()
+      .filter((event) => Number(event.occurredAt) < readThroughMs)
+
+    const plan = planSessionFacts({
+      siteId: SITE,
+      recomputed: sessionize(SITE, events),
+      stored: [],
+      nowMs: Date.parse('2026-10-20T00:00:00.000Z'),
+      readThroughMs,
+      inactivityMs: INACTIVITY_MS,
+      latenessMs: LATENESS_MS,
+      sessionMaxLengthMs: 24 * 60 * 60_000,
+    })
+
+    // Re-reading a capped prefix must not pin the entire site to its first
+    // event forever. The real finalizer clamps against this same fromMs.
+    expect(plan.finalizedThroughMs).toBeGreaterThan(fromMs)
+  })
+
   const SESSION_MAX_LENGTH_MS = 24 * 60 * 60_000
 
   it('advances the watermark past a perpetually-active identity instead of stalling', () => {

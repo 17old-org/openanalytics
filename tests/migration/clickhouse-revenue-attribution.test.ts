@@ -110,6 +110,7 @@ function factRow(
     anonymous_id: 'anon1',
     session_hint: '',
     session_hints: [],
+    event_ids: [],
     midnight_bridged: 0,
     session_start: '2026-07-20 10:00:00.000',
     session_end: '2026-07-20 10:05:00.000',

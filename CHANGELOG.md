@@ -8,6 +8,17 @@ taking.
 Releases before 0.6.0 have their notes on the
 [GitHub releases page](https://github.com/OpenLabs-so/openanalytics/releases).
 
+## Unreleased
+
+### Fixed
+
+- The session finalizer can advance through a capped backlog of overlapping
+  visitors. Exact event membership prevents closed session tails from becoming
+  duplicate sessions on the next pass. Apply ClickHouse migration 0025 before
+  deploying the matching worker. After a watermark has advanced, an old worker
+  requires a coordinated backup restore rather than an image-only rollback.
+  See [the recovery procedure](docs/session-finalizer-progress.md) for limits.
+
 ## [0.6.0] - 2026-09-05
 
 **Upgrade notes: none.** `./upgrade.sh` and nothing else. The two ClickHouse

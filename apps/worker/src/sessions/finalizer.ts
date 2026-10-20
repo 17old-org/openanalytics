@@ -134,15 +134,22 @@ export async function finalizeSite(
     // not, the bound is pulled back to where the read actually stopped, and
     // this run finalizes a prefix of the backlog instead of choking on all of
     // it. Successive runs walk forward through the rest.
-    const page = await deps.store.readWindowEvents({
-      siteId,
-      fromMs,
-      toMs: nowMs,
-      limit: MAX_WINDOW_ROWS,
-    })
+    const [page, closedTails] = await Promise.all([
+      deps.store.readWindowEvents({ siteId, fromMs, toMs: nowMs, limit: MAX_WINDOW_ROWS }),
+      deps.store.readFinalizedSessionTails({ siteId, fromMs }),
+    ])
+    // [] on a pre-migration fact is UNKNOWN membership, not an empty session.
+    // The old finalizer guaranteed no closed fact straddled its watermark, so
+    // normal upgrades bootstrap in-window rows before their first advance. If
+    // that invariant was already violated, stop rather than duplicate tails.
+    if (closedTails.some((tail) => tail.eventIds.length === 0)) {
+      throw new Error('session_finalized_tail_membership_missing: raw-event backfill required')
+    }
+    const excludedEventIds = new Set(closedTails.flatMap((tail) => tail.eventIds))
     const { windowToMs, events } = await resolveWindow(deps, siteId, fromMs, nowMs, page)
+    const pendingEvents = events.filter((event) => !excludedEventIds.has(event.eventId))
 
-    const recomputed = sessionize(siteId, events, deps.sessionConfig)
+    const recomputed = sessionize(siteId, pendingEvents, deps.sessionConfig)
     // The SAME bound. A stored fact starting after `windowToMs` is one this run
     // did not read the events for, and step 3 tombstones every stored session
     // it cannot find among the recomputed ones — so reading a wider set of
@@ -224,6 +231,15 @@ export async function finalizeSite(
     // 5. Advance the watermark (monotonic) and release the lease.
     const finalizedThroughMs = Math.max(fromMs, plan.finalizedThroughMs)
     await deps.state.advance(siteId, finalizedThroughMs)
+
+    if (page.truncated && finalizedThroughMs === fromMs) {
+      deps.logger.warn('session_finalizer_watermark_stalled', {
+        site_id: siteId,
+        from_ms: fromMs,
+        read_through_ms: windowToMs,
+        events: events.length,
+      })
+    }
 
     deps.metrics.increment(WORKER_METRICS.sessionFinalizeRuns)
     deps.metrics.increment(WORKER_METRICS.sessionFinalizeMs, {}, Date.now() - startedAt)

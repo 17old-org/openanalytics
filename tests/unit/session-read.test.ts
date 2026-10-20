@@ -199,6 +199,7 @@ describe('the stored-fact projection', () => {
       'anonymous_id',
       'session_hint',
       'session_hints',
+      'event_ids',
       'midnight_bridged',
       'pageviews',
       'engaged',

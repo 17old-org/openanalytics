@@ -45,6 +45,8 @@ export interface SessionFactRow {
   readonly session_hint: string
   /** Every hint the session carried (migration 0023). `[]` before the ALTER. */
   readonly session_hints: readonly string[]
+  /** Exact raw-event membership (migration 0025), for safe watermark tail exclusion. */
+  readonly event_ids: readonly string[]
   readonly midnight_bridged: number
   readonly session_start: string
   readonly session_end: string
@@ -98,6 +100,7 @@ export interface StoredSessionFact {
   readonly anonymousId: string
   readonly sessionHint: string
   readonly sessionHints: readonly string[]
+  readonly eventIds: readonly string[]
   readonly midnightBridged: number
   readonly pageviews: number
   readonly engaged: number
@@ -213,6 +216,11 @@ export interface SessionFactsStore {
     fromMs: number
     toMs: number
   }): Promise<StoredSessionFact[]>
+  /** Closed sessions crossing the watermark; membership must never be inferred from identity. */
+  readFinalizedSessionTails(input: {
+    siteId: string
+    fromMs: number
+  }): Promise<{ sessionId: string; eventIds: readonly string[] }[]>
   /** Insert fact versions/tombstones under a stable content token. */
   insertFactVersions(rows: readonly SessionFactRow[]): Promise<void>
   /** Recompute the rollup buckets intersecting `[loMs, hiMs)` from current facts. */
@@ -264,6 +272,7 @@ export const FACT_ARGMAX_COLUMNS = `
   argMax(sfv.anonymous_id, sfv.version)                      AS anonymous_id,
   argMax(sfv.session_hint, sfv.version)                      AS session_hint,
   argMax(sfv.session_hints, sfv.version)                     AS session_hints,
+  argMax(sfv.event_ids, sfv.version)                         AS event_ids,
   argMax(sfv.midnight_bridged, sfv.version)                  AS midnight_bridged,
   argMax(sfv.pageviews, sfv.version)                         AS pageviews,
   argMax(sfv.engaged, sfv.version)                           AS engaged,
@@ -444,6 +453,7 @@ export function createSessionFactsStore(options: SessionFactsStoreOptions): Sess
         // `Array(String)` comes back as a JSON array. A pre-0023 part reads back
         // as `[]`, which is the honest "this row predates the column".
         sessionHints: Array.isArray(row['session_hints']) ? row['session_hints'] : [],
+        eventIds: Array.isArray(row['event_ids']) ? row['event_ids'] : [],
         midnightBridged: Number(row['midnight_bridged']),
         pageviews: Number(row['pageviews']),
         engaged: Number(row['engaged']),
@@ -465,6 +475,29 @@ export function createSessionFactsStore(options: SessionFactsStoreOptions): Sess
         finalized: Number(row['finalized']),
         retracted: Number(row['retracted']),
       }))
+    },
+
+    async readFinalizedSessionTails({ siteId, fromMs }) {
+      // Filter FINALIZED/RETRACTED only after selecting the latest version. An
+      // empty membership is returned too: the finalizer must fail closed rather
+      // than treat a pre-0025 row as proof that no tail events exist.
+      const rows = await query<{ session_id: string; event_ids: string[] }>(
+        `SELECT cur.session_id, cur.event_ids FROM (
+           SELECT sfv.session_id AS session_id,
+             argMax(sfv.event_ids, sfv.version) AS event_ids,
+             argMax(sfv.session_end, sfv.version) AS session_end,
+             argMax(sfv.finalized, sfv.version) AS finalized,
+             argMax(sfv.retracted, sfv.version) AS retracted
+           FROM ${factsTable} AS sfv
+           WHERE sfv.site_id = {siteId:String}
+             AND sfv.session_start < fromUnixTimestamp64Milli({fromMs:Int64})
+           GROUP BY sfv.site_id, sfv.session_id
+         ) AS cur
+         WHERE cur.session_end >= fromUnixTimestamp64Milli({fromMs:Int64})
+           AND cur.finalized = 1 AND cur.retracted = 0`,
+        { siteId, fromMs },
+      )
+      return rows.map((row) => ({ sessionId: row.session_id, eventIds: row.event_ids }))
     },
 
     async insertFactVersions(rows): Promise<void> {

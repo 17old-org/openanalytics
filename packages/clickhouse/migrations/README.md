@@ -86,6 +86,11 @@ only reclaims space from superseded versions/generations.
 | 0013    | `session_facts_versions` — versioned canonical session facts, no MV         |
 | 0014    | `session_rollups_1h` / `session_rollups_1d` — finalizer swap targets, no MV |
 
+Migration 0025 adds exact raw-event membership to session facts so capped
+finalization can advance through overlapping visitors without duplicating
+closed tails. Apply it before the matching worker. See
+[recovery and rollback constraints](../../../docs/session-finalizer-progress.md).
+
 ## Milestone 11 — imported aggregates
 
 Imported provider data never enters `events_raw` or the additive rollup family

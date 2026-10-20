@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createClient } from '@clickhouse/client'
-import { createSessionFactsStore, migrateClickHouse } from '@openanalytics/clickhouse'
+import {
+  createSessionFactsStore,
+  migrateClickHouse,
+  type SessionFactRow,
+} from '@openanalytics/clickhouse'
 import { DEFAULT_SESSION_CONFIG } from '@openanalytics/domain'
 import { createRecordingMetrics } from '@openanalytics/observability'
 import { createCapturedLogger } from '@openanalytics/testkit'
@@ -343,5 +347,95 @@ describeIfClickHouse('session finalizer behaviour', () => {
     )
     // 8 seconds of active time, not 16 — the duplicate beacon collapsed.
     expect(Number(row!.active)).toBe(8_000)
+  })
+
+  it('drains capped overlapping visitors with exact membership and correct rollups (0025)', async () => {
+    const site = randomUUID()
+    const state = memoryState()
+    const baseMs = Date.parse('2026-05-05T10:00:00.000Z')
+    const events: RawEvent[] = Array.from({ length: 36 }, (_, index) => [
+      {
+        eventId: randomUUID(),
+        type: 'page_view',
+        occurredMs: baseMs + index * 10 * 60_000,
+        anonymousId: `v${index}`,
+        sessionHint: `hint${index}`,
+      },
+      {
+        eventId: randomUUID(),
+        type: 'page_view',
+        occurredMs: baseMs + (index * 10 + 20) * 60_000,
+        anonymousId: `v${index}`,
+        sessionHint: `hint${index}`,
+      },
+    ]).flat()
+    await insertEvents(site, events)
+    state.set(site, baseMs)
+    const now = { ms: baseMs + 72 * 60 * 60_000 }
+    const deps = {
+      ...makeDeps(state, now),
+      store: {
+        ...store,
+        readWindowEvents: (input: Parameters<typeof store.readWindowEvents>[0]) =>
+          store.readWindowEvents(input.limit === undefined ? input : { ...input, limit: 16 }),
+      },
+    }
+    const target = now.ms - LATENESS_MS - INACTIVITY_MS
+    for (let pass = 0; pass < 50 && state.get(site) < target; pass++) {
+      const before = state.get(site)
+      await finalizeSite(deps, site)
+      expect(state.get(site)).toBeGreaterThan(before)
+    }
+    expect(state.get(site)).toBe(target)
+    const current = await queryRows<{ ids: string[]; retracted: number }>(
+      `SELECT argMax(sfv.event_ids, sfv.version) AS ids,
+              argMax(sfv.retracted, sfv.version) AS retracted
+         FROM session_facts_versions AS sfv WHERE site_id = '${site}'
+        GROUP BY site_id, session_id`,
+    )
+    const ids = current.filter((row) => Number(row.retracted) === 0).flatMap((row) => row.ids)
+    expect(ids.length).toBe(new Set(ids).size)
+    expect(ids.sort()).toEqual(events.map((event) => event.eventId!).sort())
+    const [rollup] = await currentRollup1h(site)
+    expect(Number(rollup!.sessions)).toBe(36)
+    expect(Number(rollup!.engaged)).toBe(36)
+    const rerun = await finalizeSite(deps, site)
+    expect([rerun.changed, rerun.retracted, rerun.rollupSwaps]).toEqual([0, 0, 0])
+  })
+
+  it('preserves unknown legacy tails and filters tombstones after argMax (0025)', async () => {
+    const site = randomUUID()
+    const state = memoryState()
+    const baseMs = Date.parse('2026-05-06T10:00:00.000Z')
+    await insertEvents(site, [
+      { type: 'page_view', occurredMs: baseMs },
+      { type: 'page_view', occurredMs: baseMs + 20 * 60_000 },
+    ])
+    const now = { ms: baseMs + 72 * 60 * 60_000 }
+    const deps = makeDeps(state, now)
+    await finalizeSite(deps, site)
+    const [row] = await queryRows<SessionFactRow>(
+      `SELECT * FROM session_facts_versions WHERE site_id = '${site}' LIMIT 1`,
+    )
+    const midpoint = baseMs + 10 * 60_000
+    const legacy = { ...row!, version: Number(row!.version) + 1, event_ids: [] }
+    await store.insertFactVersions([legacy])
+    // Empty membership must remain visible, not disappear through arrayJoin.
+    expect(await store.readFinalizedSessionTails({ siteId: site, fromMs: midpoint })).toEqual([
+      { sessionId: row!.session_id, eventIds: [] },
+    ])
+    state.set(site, midpoint)
+    await expect(finalizeSite(deps, site)).rejects.toThrow(
+      'session_finalized_tail_membership_missing',
+    )
+    expect(state.get(site)).toBe(midpoint)
+
+    // A controlled pre-advance replay upgrades an in-window legacy fact.
+    state.set(site, baseMs)
+    expect((await finalizeSite(deps, site)).changed).toBe(1)
+    const tails = await store.readFinalizedSessionTails({ siteId: site, fromMs: midpoint })
+    expect(tails[0]!.eventIds).toHaveLength(2)
+    await store.insertFactVersions([{ ...legacy, version: legacy.version + 2, retracted: 1 }])
+    expect(await store.readFinalizedSessionTails({ siteId: site, fromMs: midpoint })).toEqual([])
   })
 })

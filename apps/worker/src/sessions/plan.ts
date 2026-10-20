@@ -32,14 +32,11 @@ import type {
  * flag is set from the caller's `nowMs` against the inactivity + lateness
  * horizon; a session past it can never change again.
  *
- * The watermark this returns is `min(horizon, earliest provisional session
- * start)`, pulled back to a fixpoint so that no recomputed session's span
- * straddles it. The naive `min(...)` is unsafe on its own: the next recompute
- * window reads by `>= watermark`, so a session that overlaps the watermark in
- * wall-clock time would be split — its tail re-sessionized under a new id while
- * the stored original stays invisible to the diff — and duplicated. The
- * pull-back re-includes any overlapping (typically already finalized) session in
- * the next window, where it recomputes byte-identical and writes nothing.
+ * The watermark is `min(horizon, earliest provisional session start)`. Closed
+ * sessions may cross it in wall-clock time: their exact event membership is
+ * durable before the advance, and the next run excludes those tails. Requiring
+ * a site-wide gap instead lets independent overlapping visitors form an
+ * arbitrarily long chain, pinning a capped read to the same prefix forever.
  */
 
 const MS_PER_HOUR = 3_600_000
@@ -86,6 +83,7 @@ interface FactFingerprint {
    * further, because nothing below it is ever read again.
    */
   readonly sessionHints: string
+  readonly eventIds: string
   readonly midnightBridged: number
   readonly pageviews: number
   readonly engaged: number
@@ -147,6 +145,7 @@ function fingerprintOfSession(session: CanonicalSession, finalized: number): Fac
     // already sorted and deduplicated, so equal contents give equal text, and a
     // scalar keeps `fingerprintsEqual` a flat list of `===` comparisons.
     sessionHints: session.sessionHints.join('\u0000'),
+    eventIds: session.eventIds.join('\u0000'),
     midnightBridged: session.midnightBridged ? 1 : 0,
     pageviews: session.pageviews,
     engaged: session.engaged ? 1 : 0,
@@ -178,6 +177,7 @@ function fingerprintOfStored(stored: StoredSessionFact): FactFingerprint {
     anonymousId: stored.anonymousId,
     sessionHint: stored.sessionHint,
     sessionHints: [...stored.sessionHints].sort().join('\u0000'),
+    eventIds: stored.eventIds.join('\u0000'),
     midnightBridged: stored.midnightBridged,
     pageviews: stored.pageviews,
     engaged: stored.engaged,
@@ -209,6 +209,7 @@ function fingerprintsEqual(a: FactFingerprint, b: FactFingerprint): boolean {
     a.anonymousId === b.anonymousId &&
     a.sessionHint === b.sessionHint &&
     a.sessionHints === b.sessionHints &&
+    a.eventIds === b.eventIds &&
     a.midnightBridged === b.midnightBridged &&
     a.pageviews === b.pageviews &&
     a.engaged === b.engaged &&
@@ -245,6 +246,7 @@ function sessionToFactRow(
     anonymous_id: session.anonymousId,
     session_hint: session.sessionHint,
     session_hints: session.sessionHints,
+    event_ids: session.eventIds,
     midnight_bridged: session.midnightBridged ? 1 : 0,
     session_start: chDateTime64(session.startMs),
     session_end: chDateTime64(session.endMs),
@@ -292,6 +294,7 @@ function storedToTombstoneRow(
     anonymous_id: stored.anonymousId,
     session_hint: stored.sessionHint,
     session_hints: stored.sessionHints,
+    event_ids: stored.eventIds,
     midnight_bridged: stored.midnightBridged,
     session_start: chDateTime64(stored.startMs),
     session_end: chDateTime64(stored.endMs),
@@ -375,10 +378,8 @@ export interface SessionFactsPlan {
   readonly affectedDayBucketsMs: readonly number[]
   /**
    * The watermark this run may advance to: `min(horizon, earliest provisional
-   * session start)`, then pulled back so that no recomputed session's span
-   * straddles it (else the next `>= watermark` window would bisect an
-   * overlapping finalized session and duplicate its tail). Everything before it
-   * is finalized. Caller clamps it to be monotonic against the stored watermark.
+   * session start)`. Closed sessions crossing it have durable event membership
+   * that the next run excludes. Caller clamps it against the stored watermark.
    */
   readonly finalizedThroughMs: number
 }
@@ -468,36 +469,13 @@ export function planSessionFacts(input: SessionFactsPlanInput): SessionFactsPlan
     retracted += 1
   }
 
-  // The watermark starts at min(horizon, earliest provisional start), but that is
-  // not yet safe: the next window reads events and stored facts by
-  // `>= watermark`, so a session whose SPAN straddles the watermark would be
-  // bisected — its tail re-sessionized under a new id (a different first event),
-  // with the stored original invisible to the diff (its session_start is below
-  // the watermark), producing a spurious, un-tombstoned duplicate. So pull the
-  // watermark back to a fixpoint where no recomputed session straddles it. This
-  // catches an already-FINALIZED session that overlaps the earliest provisional
-  // one in wall-clock time (ordinary — different visitors overlap). Re-reading
-  // such a finalized session next run is harmless: it recomputes byte-identical
-  // and the change detector writes nothing.
-  //
-  // `endMs >= wm` (not `>`): an event at exactly `occurred_at == wm` is included
-  // by the next window's `>=` read, so a session ending exactly on the watermark
-  // would still leak a one-event fragment. The loop terminates because the
-  // watermark only ever moves to a session start, a finite set, and only
-  // downward.
-  let finalizedThroughMs = Math.min(
+  // Never pull this back through CLOSED sessions of other visitors: a busy
+  // site can have a continuous overlap chain even when every session is short.
+  // Their durable event_ids let the next run exclude the exact closed tails.
+  const finalizedThroughMs = Math.min(
     horizonMs,
     earliestProvisionalStart === Number.POSITIVE_INFINITY ? horizonMs : earliestProvisionalStart,
   )
-  for (let moved = true; moved;) {
-    moved = false
-    for (const session of input.recomputed) {
-      if (session.startMs < finalizedThroughMs && session.endMs >= finalizedThroughMs) {
-        finalizedThroughMs = session.startMs
-        moved = true
-      }
-    }
-  }
 
   return {
     factRows,
