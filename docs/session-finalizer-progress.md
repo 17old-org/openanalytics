@@ -43,7 +43,11 @@ also checks real tail SQL, latest-version tombstone handling and final rollups.
    action, not an effect of opening or updating the pull request.
    GitHub requires this workflow to exist on the default branch before it can
    be dispatched. Register it through the separate workflow-only pull request
-   first, then select the reviewed repair branch as the dispatch ref.
+   first, then dispatch the default-branch workflow with `source_sha` set to the
+   reviewed full commit SHA. Checkout, the image tag and `GIT_COMMIT` are pinned
+   to that input and verified before publishing. Merge the repair into its
+   isolated `codex/skillry-session-release` branch so the API feature branch's
+   automatic image publication is not triggered.
 3. Run the normal ClickHouse migration runner with the reviewed migrations.
    Dry-run first, verify only expected pending files, then apply. The migration
    account performs DDL. No worker credential or grant changes are required.
