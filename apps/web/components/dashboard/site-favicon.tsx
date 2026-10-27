@@ -19,7 +19,7 @@ import { cn } from "@/lib/utils";
  * possible.
  */
 export const faviconUrl = (domain: string) =>
-  `/api/favicon?domain=${encodeURIComponent(domain)}`;
+  `/api/favicon?domain=${encodeURIComponent(domain)}&v=2`;
 
 /**
  * The allowlist as favicon candidates, in order: trimmed, lowercased, the

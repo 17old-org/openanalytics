@@ -21,6 +21,24 @@ const HOSTNAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?
 const HIT_CACHE = "public, max-age=86400, s-maxage=604800, stale-while-revalidate=86400";
 const MISS_CACHE = "public, max-age=3600, s-maxage=86400";
 
+/** Operator-configured official icons bypass stale third-party copies.
+ * The request can only select a domain; it cannot supply an outbound URL. */
+function officialIcon(domain: string): string | undefined {
+  try {
+    const overrides: unknown = JSON.parse(process.env['FAVICON_OVERRIDES'] ?? '{}');
+    if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) return;
+    const value = Object.hasOwn(overrides, domain)
+      ? (overrides as Record<string, unknown>)[domain]
+      : undefined;
+    if (typeof value !== 'string') return;
+    const url = new URL(value);
+    if (url.protocol === 'https:' && !url.username && !url.password) return url.href;
+  } catch {
+    // An invalid optional override keeps the existing provider lookup.
+  }
+  return undefined;
+}
+
 export async function GET(request: Request): Promise<Response> {
   const domain = (
     new URL(request.url).searchParams.get("domain") ?? ""
@@ -32,11 +50,16 @@ export async function GET(request: Request): Promise<Response> {
     return new Response(null, { status: 400 });
   }
 
-  const upstream = `https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=${encodeURIComponent(`https://${domain}`)}&size=64`;
+  const official = officialIcon(domain);
+  const upstream = official ?? `https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=${encodeURIComponent(`https://${domain}`)}&size=64`;
 
   let response: Response;
   try {
-    response = await fetch(upstream, { cache: "no-store" });
+    response = await fetch(upstream, {
+      cache: "no-store",
+      ...(official ? { redirect: 'error' as const } : {}),
+      signal: AbortSignal.timeout(5000),
+    });
   } catch {
     // Upstream unreachable is a miss, not a 500: the caller draws its own
     // mark either way, and a broken favicon is never worth an error page.
