@@ -910,6 +910,38 @@ build here, set `OA_GIT_COMMIT=$(git rev-parse HEAD)` in `infra/selfhost/.env`
 first, or every service answers `unknown` — `./upgrade.sh --from-source` does it
 for you.
 
+The collector's dependency list includes `event_queue`: `degraded` once the
+queue instance is at 90 % of its `maxmemory`, `unavailable` when it cannot be
+reached. Every `202` the collector answers depends on a queue write, so treat
+either as the collector being at risk, not as a footnote.
+
+### The event queue's memory
+
+Processed events stay in the queue for `ACKED_QUEUE_RETENTION_DAYS` (7 by
+default) so ClickHouse can be replayed after a disaster. That window is an age,
+and the queue's `maxmemory` is a size — at a few hundred bytes to a couple of
+kilobytes per event, a busy install fills it long before seven days pass, and
+with `noeviction` a full queue refuses every new event (the collector answers
+`503`, and those events are lost if the tracker gives up retrying).
+
+The worker guards against that itself. Whenever the queue is above
+`QUEUE_MEMORY_TRIM_RATIO` of `maxmemory` (0.6 by default) it trims processed
+events oldest-first until it is back under, at most once every 30 seconds, and
+logs `queue_memory_pressure_trimmed` when it does. It never removes an event
+that has not been stored yet, nor the newest `QUEUE_MEMORY_TRIM_FLOOR_MINUTES`
+(60 by default) of processed ones — so under sustained pressure the replay
+window shrinks to that floor instead of the queue filling. If you see that log
+line often, the queue is undersized for your traffic: raise `maxmemory` in
+`valkey/valkey-queue.conf` (and the container's memory limit with it) rather
+than the ratio.
+
+Alert on these two series if you scrape the metrics:
+
+| Series                         | Alert when                                               |
+| ------------------------------ | -------------------------------------------------------- |
+| `worker_valkey_memory_ratio`   | above `0.7` for 10 minutes — the guard is not keeping up |
+| `collector_queue_write_failed` | any increase — events are being refused right now        |
+
 ### Losing a secret
 
 | Lost                        | Consequence                                                                                                               |

@@ -199,6 +199,28 @@ export interface QueueMaintenance {
   oldestPendingAgeMs(now: Date): Promise<number | null>
 
   /**
+   * Trim ACKed entries, oldest first, until used memory is back at or under
+   * `targetRatio` of `maxmemory`.
+   *
+   * Retention is an age, so a traffic increase fills `maxmemory` long before
+   * the age horizon is reached — and with `noeviction` a full instance refuses
+   * every new event. This trades replay window for availability, and only for
+   * finished work: it never removes a pending or undelivered entry, nor any
+   * entry younger than `floorMs`. A no-op below the target or on an instance
+   * without `maxmemory`.
+   */
+  trimForMemory(input: {
+    readonly now: Date
+    readonly targetRatio: number
+    readonly floorMs: number
+  }): Promise<{
+    trimmed: number
+    ratioBefore: number | null
+    ratioAfter: number | null
+    minId: string | null
+  }>
+
+  /**
    * Used memory as a fraction of `maxmemory`, or null when the instance is
    * configured without a limit.
    *
