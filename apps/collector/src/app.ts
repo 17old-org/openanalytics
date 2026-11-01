@@ -1,7 +1,7 @@
 import { API_VERSION } from '@openanalytics/contracts'
 import type { ServiceEnv } from '@openanalytics/domain'
 import type { Logger, Metrics, ServiceMetadata } from '@openanalytics/observability'
-import { createServiceApp } from '@openanalytics/observability/hono'
+import { createServiceApp, type HealthCheck } from '@openanalytics/observability/hono'
 import { Hono } from 'hono'
 import { publicIngestCors } from './cors.ts'
 import type { CollectorDeps } from './deps.ts'
@@ -35,6 +35,8 @@ export interface AppDeps {
    * shared middleware meters every request; optional so the M4 contract tests
    * still build a bare app. */
   readonly metrics?: Metrics
+  /** Dependencies `/health` reports, the event queue among them. */
+  readonly checks?: readonly HealthCheck[]
   /**
    * Resolves a tracking key to its site configuration. Without one the config
    * route answers `SERVICE_UNAVAILABLE` rather than pretending the site does not
@@ -59,6 +61,7 @@ export function createApp(deps: AppDeps) {
     service: deps.service,
     logger: deps.logger,
     ...(deps.metrics ? { metrics: deps.metrics } : {}),
+    ...(deps.checks ? { checks: deps.checks } : {}),
   })
 
   /**

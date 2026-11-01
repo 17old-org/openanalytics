@@ -29,6 +29,18 @@ export const policySchema = z
     SITE_QUEUE_INDEX_TTL_DAYS: z.coerce.number().int().min(1).default(8),
 
     /**
+     * The event queue's memory guard. Retention above is an age, so a traffic
+     * increase fills `maxmemory` long before the age horizon arrives — and with
+     * `noeviction` a full queue refuses every new event (the 503s of 2026-08-22
+     * and 2026-11-01). Above this fraction of `maxmemory` the worker trims
+     * ACKed entries oldest-first until it is back under it, trading replay
+     * window for availability. Never pending or undelivered work, and never the
+     * newest `QUEUE_MEMORY_TRIM_FLOOR_MINUTES` of finished work.
+     */
+    QUEUE_MEMORY_TRIM_RATIO: z.coerce.number().gt(0).lt(1).default(0.6),
+    QUEUE_MEMORY_TRIM_FLOOR_MINUTES: z.coerce.number().int().min(1).default(60),
+
+    /**
      * How long a *completed* `idempotency_keys` row stays replayable
      * (ADR-0019 known gap 4, closed by the amendment dated 2026-08-06).
      *

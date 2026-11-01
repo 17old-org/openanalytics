@@ -30,6 +30,37 @@ export function minIdFor(before: Date): string {
   return `${before.getTime()}-0`
 }
 
+/**
+ * The earliest of several stream ids, ignoring nulls; null when all are null.
+ *
+ * Ordered by the encoded timestamp, then by sequence — the order Valkey itself
+ * uses — so two ids in the same millisecond still compare correctly.
+ */
+export function earliestStreamId(...ids: readonly (string | null)[]): string | null {
+  let earliest: string | null = null
+  for (const id of ids) {
+    if (id === null) continue
+    if (earliest === null || compareStreamIds(id, earliest) < 0) earliest = id
+  }
+  return earliest
+}
+
+function compareStreamIds(a: string, b: string): number {
+  const [aMs = '0', aSeq = '0'] = a.split('-')
+  const [bMs = '0', bSeq = '0'] = b.split('-')
+  const byMs = Number(aMs) - Number(bMs)
+  return byMs !== 0 ? byMs : Number(aSeq) - Number(bSeq)
+}
+
+/**
+ * Steps the memory-pressure trim may take before giving up for this round.
+ *
+ * Each step halves the distance to the safe bound, and the last one goes all
+ * the way to it, so a full instance is relieved within a handful of round trips
+ * while a nearly-full one loses only the oldest slice it needs to.
+ */
+const MEMORY_TRIM_MAX_STEPS = 5
+
 /** Picks the earlier of the retention cutoff and the oldest pending entry. */
 export function safeTrimMinId(retentionMinId: string, oldestPendingId: string | null): string {
   if (oldestPendingId === null) return retentionMinId
@@ -154,7 +185,14 @@ export function createQueueMaintenance(options: QueueMaintenanceOptions): QueueM
 
     async trimAcked({ before }): Promise<{ trimmed: number; minId: string }> {
       const summary = parsePendingSummary(await client.call('XPENDING', streamKey, groupName))
-      const minId = safeTrimMinId(minIdFor(before), summary.minId)
+      // Undelivered entries are protected as well as pending ones: a worker that
+      // stopped reading for longer than the horizon would otherwise have events
+      // it never stored trimmed away as if they were finished work.
+      const minId =
+        earliestStreamId(
+          safeTrimMinId(minIdFor(before), summary.minId),
+          await oldestUndeliveredId(),
+        ) ?? minIdFor(before)
 
       // MINID rather than MAXLEN: retention here is an age, and a length cap
       // would discard by volume — so a traffic spike would silently shorten the
@@ -180,6 +218,45 @@ export function createQueueMaintenance(options: QueueMaintenanceOptions): QueueM
       if (candidate === null) return null
       const at = streamIdTimestampMs(candidate)
       return at === null ? null : Math.max(0, now.getTime() - at)
+    },
+
+    async trimForMemory({ now, targetRatio, floorMs }) {
+      const ratioBefore = await this.memoryUsageRatio()
+      if (ratioBefore === null || ratioBefore <= targetRatio) {
+        return { trimmed: 0, ratioBefore, ratioAfter: ratioBefore, minId: null }
+      }
+
+      const first = (await client.call('XRANGE', streamKey, '-', '+', 'COUNT', '1')) as
+        [string, string[]][] | null
+      const oldestId = first?.[0]?.[0] ?? null
+      const summary = parsePendingSummary(await client.call('XPENDING', streamKey, groupName))
+      // The furthest this trim may ever reach: never past work that is waiting
+      // (pending or undelivered), and never into the floor window, whatever the
+      // memory reading says — a refused write is recoverable, a lost event is not.
+      const bound = earliestStreamId(
+        summary.minId,
+        await oldestUndeliveredId(),
+        minIdFor(new Date(now.getTime() - floorMs)),
+      )
+      const oldestMs = oldestId === null ? null : streamIdTimestampMs(oldestId)
+      const boundMs = bound === null ? null : streamIdTimestampMs(bound)
+      if (bound === null || oldestMs === null || boundMs === null || boundMs <= oldestMs) {
+        return { trimmed: 0, ratioBefore, ratioAfter: ratioBefore, minId: null }
+      }
+
+      let trimmed = 0
+      let ratioAfter: number | null = ratioBefore
+      let minId: string | null = null
+      for (let step = 1; step <= MEMORY_TRIM_MAX_STEPS; step++) {
+        minId =
+          step === MEMORY_TRIM_MAX_STEPS
+            ? bound
+            : `${oldestMs + Math.floor((boundMs - oldestMs) * (1 - 2 ** -step))}-0`
+        trimmed += Number((await client.call('XTRIM', streamKey, 'MINID', minId)) ?? 0)
+        ratioAfter = await this.memoryUsageRatio()
+        if (ratioAfter === null || ratioAfter <= targetRatio) break
+      }
+      return { trimmed, ratioBefore, ratioAfter, minId }
     },
 
     async memoryUsageRatio(): Promise<number | null> {

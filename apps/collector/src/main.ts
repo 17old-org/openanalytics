@@ -15,6 +15,7 @@ import { createGeoLookupFromFile } from './geoip.ts'
 import { createIngestConfigStore, createTrackerConfigStore } from './ingest-config-store.ts'
 import { readTrackerScript } from './tracker-script.ts'
 import { collectorCloudExtension } from './cloud-extension.ts'
+import { createQueueHealthCheck } from './queue-health.ts'
 
 const { env, logger, service } = bootstrapService()
 // G-006 remote-write, with the structured-log floor underneath (ADR-0010,
@@ -201,6 +202,7 @@ const app = createApp({
   ...(trackerConfigStore === undefined ? {} : { trackerConfigStore }),
   ...(trackerScript === undefined ? {} : { trackerScript }),
   ...(ingest === undefined ? {} : { ingest }),
+  ...(queueClient === null ? {} : { checks: [createQueueHealthCheck({ client: queueClient })] }),
 })
 
 const server = serve({ fetch: app.fetch, port: env.PORT }, (info) => {

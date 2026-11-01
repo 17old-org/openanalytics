@@ -17,6 +17,18 @@ Everyone else has nothing to do.
 
 ### Added
 
+- **The worker keeps the event queue from filling.** Retention is an age, so a
+  busy install could fill the queue's `maxmemory` long before seven days
+  passed, and `noeviction` then refused every new event with `503`. Above
+  `QUEUE_MEMORY_TRIM_RATIO` of `maxmemory` (0.6) the worker now trims processed
+  events oldest-first, never touching unstored events or the newest
+  `QUEUE_MEMORY_TRIM_FLOOR_MINUTES` (60) of processed ones. Nothing to do by
+  hand; both values have defaults. See `SELF-HOSTING.md`, "The event queue's
+  memory", for the alerts to set.
+- **The collector's `/health` reports the event queue.** `degraded` from 90 %
+  of `maxmemory`, `unavailable` when the queue cannot be reached. It used to
+  answer `ok` while every event was being refused.
+
 - **Postgres on Neon.** `infra/selfhost/NEON.md` walks a new install, and
   moving an existing one, onto [Neon](https://neon.com);
   `docker-compose.neon.yml` takes the bundled `postgres` service out of the
@@ -26,6 +38,10 @@ Everyone else has nothing to do.
   restored to that instant first.
 
 ### Changed
+
+- **The retention trim never removes undelivered events.** It protected
+  pending events but not ones a stopped worker had not read yet, so a worker
+  down for longer than `ACKED_QUEUE_RETENTION_DAYS` would have lost them.
 
 - **The optional object storage is RustFS, not MinIO.** MinIO stopped
   publishing images — Docker Hub on 2026-09-16, then Quay on 2026-09-25 —

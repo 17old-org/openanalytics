@@ -178,6 +178,29 @@ describe('policy configuration', () => {
  * silently loosening an abuse ceiling. Every value below is quoted from
  * `docs/snapshot/05-aciq-qerarlar.md` G-005 or D-103 — none is chosen here.
  */
+describe('queue memory guard', () => {
+  it('trims for memory above 60 % and keeps the last hour by default', () => {
+    const policy = loadPolicy({})
+    expect(policy.QUEUE_MEMORY_TRIM_RATIO).toBe(0.6)
+    expect(policy.QUEUE_MEMORY_TRIM_FLOOR_MINUTES).toBe(60)
+  })
+
+  it('reads both values from the environment', () => {
+    const policy = loadPolicy({
+      QUEUE_MEMORY_TRIM_RATIO: '0.75',
+      QUEUE_MEMORY_TRIM_FLOOR_MINUTES: '15',
+    })
+    expect(policy.QUEUE_MEMORY_TRIM_RATIO).toBe(0.75)
+    expect(policy.QUEUE_MEMORY_TRIM_FLOOR_MINUTES).toBe(15)
+  })
+
+  it('refuses a ratio that could never trigger or would always trigger', () => {
+    expect(() => loadPolicy({ QUEUE_MEMORY_TRIM_RATIO: '0' })).toThrow()
+    expect(() => loadPolicy({ QUEUE_MEMORY_TRIM_RATIO: '1' })).toThrow()
+    expect(() => loadPolicy({ QUEUE_MEMORY_TRIM_FLOOR_MINUTES: '0' })).toThrow()
+  })
+})
+
 describe('G-005 abuse ceilings and collector limits', () => {
   it('carries the closed G-005 values as defaults', () => {
     const policy = loadPolicy({})

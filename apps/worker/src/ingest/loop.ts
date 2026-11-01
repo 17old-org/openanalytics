@@ -139,6 +139,14 @@ export async function recoverManifests(deps: IngestDeps, limit: number): Promise
  */
 const HEARTBEAT_MIN_INTERVAL_MS = 5_000
 
+/**
+ * At most one memory-pressure trim per this interval. The trim itself stops at
+ * the target, so this only bounds how often a queue that keeps refilling is
+ * re-examined — fast enough that a spike is relieved before `noeviction`
+ * refuses writes, slow enough not to issue XTRIMs on every tick.
+ */
+const MEMORY_TRIM_MIN_INTERVAL_MS = 30_000
+
 export interface IngestLoopOptions {
   readonly deps: IngestDeps
   /** Manifests recovered per iteration. Bounded so recovery cannot starve reads. */
@@ -176,6 +184,7 @@ export function createIngestLoop(options: IngestLoopOptions): IngestLoop {
   // ticks. Starts at -Infinity so the first tick always writes: a worker that
   // has just come up is exactly when someone wants to see a fresh row.
   let lastHeartbeatMs = Number.NEGATIVE_INFINITY
+  let lastMemoryTrimMs = Number.NEGATIVE_INFINITY
 
   /**
    * Records that ingest is alive, independently of whether anyone visited
@@ -235,11 +244,46 @@ export function createIngestLoop(options: IngestLoopOptions): IngestLoop {
     // `maxmemory` is unset and there is no ratio to publish; zero would be the
     // healthiest reading this gauge has, published for the configuration where
     // the failure mode is worst.
+    let ratio: number | null = null
     try {
-      const ratio = await deps.maintenance.memoryUsageRatio()
+      ratio = await deps.maintenance.memoryUsageRatio()
       if (ratio !== null) deps.metrics.gauge(WORKER_METRICS.valkeyMemoryRatio, ratio)
     } catch (err) {
       deps.logger.warn('queue_memory_unavailable', { err, retryable: true })
+    }
+
+    // Acting on the reading, not only publishing it: retention is an age, so a
+    // traffic increase fills `maxmemory` before the hourly retention trim would
+    // free anything, and `noeviction` then refuses every new event. Its own
+    // try/catch for the same reason as the two readings above.
+    if (ratio !== null && ratio > deps.policy.QUEUE_MEMORY_TRIM_RATIO) {
+      const tickMs = tickAt.getTime()
+      if (tickMs - lastMemoryTrimMs >= MEMORY_TRIM_MIN_INTERVAL_MS) {
+        lastMemoryTrimMs = tickMs
+        try {
+          const result = await deps.maintenance.trimForMemory({
+            now: tickAt,
+            targetRatio: deps.policy.QUEUE_MEMORY_TRIM_RATIO,
+            floorMs: deps.policy.QUEUE_MEMORY_TRIM_FLOOR_MINUTES * 60_000,
+          })
+          if (result.trimmed > 0) {
+            deps.metrics.increment(
+              WORKER_METRICS.queueTrimmed,
+              { reason: 'memory' },
+              result.trimmed,
+            )
+          }
+          deps.logger.warn('queue_memory_pressure_trimmed', {
+            trimmed: result.trimmed,
+            ratio_before: result.ratioBefore,
+            ratio_after: result.ratioAfter,
+            min_id: result.minId,
+            target_ratio: deps.policy.QUEUE_MEMORY_TRIM_RATIO,
+          })
+        } catch (err) {
+          deps.logger.error('queue_memory_trim_failed', { err, retryable: true })
+        }
+      }
     }
 
     // Written even when the age could not be read: the tick still happened, and
